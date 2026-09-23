@@ -1,10 +1,24 @@
 import requests
 import re
+import xml.etree.ElementTree as ET
 
 from mcp.server.fastmcp import FastMCP
 
 
-mcp = FastMCP("Research Tools")
+# =========================================================
+# MCP SERVER
+# =========================================================
+
+mcp = FastMCP(
+    "Research Tools"
+)
+
+
+# =========================================================
+# ARXIV XML NAMESPACE
+# =========================================================
+
+ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 
 # =========================================================
@@ -13,6 +27,7 @@ mcp = FastMCP("Research Tools")
 
 @mcp.tool()
 def search_openalex(topic: str) -> list:
+
     """Search OpenAlex for research papers."""
 
     url = "https://api.openalex.org/works"
@@ -22,9 +37,14 @@ def search_openalex(topic: str) -> list:
         "per-page": 5
     }
 
+    headers = {
+        "User-Agent": "ResearchAgent/1.0"
+    }
+
     response = requests.get(
         url,
         params=params,
+        headers=headers,
         timeout=30
     )
 
@@ -34,15 +54,88 @@ def search_openalex(topic: str) -> list:
 
     papers = []
 
-    for paper in data.get("results", []):
+    for paper in data.get(
+        "results",
+        []
+    ):
 
-        papers.append({
-            "source": "OpenAlex",
-            "title": paper.get("title"),
-            "year": paper.get("publication_year"),
-            "citations": paper.get("cited_by_count"),
-            "doi": paper.get("doi")
-        })
+        pdf_url = None
+
+        # -------------------------------------------------
+        # BEST OA LOCATION
+        # -------------------------------------------------
+
+        best_oa = paper.get(
+            "best_oa_location"
+        ) or {}
+
+        pdf_url = best_oa.get(
+            "pdf_url"
+        )
+
+        # -------------------------------------------------
+        # PRIMARY LOCATION
+        # -------------------------------------------------
+
+        if not pdf_url:
+
+            primary = paper.get(
+                "primary_location"
+            ) or {}
+
+            pdf_url = primary.get(
+                "pdf_url"
+            )
+
+        # -------------------------------------------------
+        # OTHER LOCATIONS
+        # -------------------------------------------------
+
+        if not pdf_url:
+
+            locations = paper.get(
+                "locations"
+            ) or []
+
+            for location in locations:
+
+                if not isinstance(
+                    location,
+                    dict
+                ):
+                    continue
+
+                pdf_url = location.get(
+                    "pdf_url"
+                )
+
+                if pdf_url:
+
+                    break
+
+        papers.append(
+            {
+                "source": "OpenAlex",
+
+                "title": paper.get(
+                    "title"
+                ),
+
+                "year": paper.get(
+                    "publication_year"
+                ),
+
+                "citations": paper.get(
+                    "cited_by_count"
+                ),
+
+                "doi": paper.get(
+                    "doi"
+                ),
+
+                "pdf_url": pdf_url
+            }
+        )
 
     return papers
 
@@ -53,6 +146,7 @@ def search_openalex(topic: str) -> list:
 
 @mcp.tool()
 def search_arxiv(topic: str) -> list:
+
     """Search arXiv for research papers."""
 
     url = "https://export.arxiv.org/api/query"
@@ -65,135 +159,67 @@ def search_arxiv(topic: str) -> list:
         "sortOrder": "descending"
     }
 
+    headers = {
+        "User-Agent": "ResearchAgent/1.0"
+    }
+
     response = requests.get(
         url,
         params=params,
+        headers=headers,
         timeout=30
     )
 
     response.raise_for_status()
 
-    xml = response.text
-
     # -----------------------------------------------------
-    # Extract each arXiv entry from XML
+    # PARSE XML
     # -----------------------------------------------------
 
-    entries = re.findall(
-        r"<entry>(.*?)</entry>",
-        xml,
-        flags=re.DOTALL
-    )
+    try:
+
+        root = ET.fromstring(
+            response.content
+        )
+
+    except ET.ParseError as e:
+
+        raise ValueError(
+            f"Could not parse arXiv response: {e}"
+        )
 
     papers = []
 
-    for entry in entries:
+    # -----------------------------------------------------
+    # READ ENTRIES
+    # -----------------------------------------------------
+
+    for entry in root.findall(
+        f"{ATOM_NS}entry"
+    ):
 
         # -------------------------------------------------
         # TITLE
         # -------------------------------------------------
 
-        title_match = re.search(
-            r"<title>(.*?)</title>",
-            entry,
-            flags=re.DOTALL
+        title_element = entry.find(
+            f"{ATOM_NS}title"
         )
 
-        if title_match:
-
-            title = title_match.group(1)
+        if (
+            title_element is not None
+            and title_element.text
+        ):
 
             title = re.sub(
                 r"\s+",
                 " ",
-                title
+                title_element.text
             ).strip()
 
         else:
 
             title = "Unknown arXiv paper"
-
-
-        # -------------------------------------------------
-        # ARXIV ID
-        # -------------------------------------------------
-
-        id_match = re.search(
-            r"<id>(.*?)</id>",
-            entry,
-            flags=re.DOTALL
-        )
-
-        arxiv_id = None
-
-        if id_match:
-
-            arxiv_id = id_match.group(1).strip()
-
-            # Example:
-            # http://arxiv.org/abs/2605.23989v1
-            #
-            # Get only:
-            # 2605.23989v1
-
-            if "/abs/" in arxiv_id:
-
-                arxiv_id = arxiv_id.split(
-                    "/abs/"
-                )[-1]
-
-
-        # -------------------------------------------------
-        # FALLBACK: FIND ARXIV ID ANYWHERE IN ENTRY
-        # -------------------------------------------------
-
-        if not arxiv_id:
-
-            id_match = re.search(
-                r"arxiv\.org/(?:abs|pdf)/([^\s<]+)",
-                entry,
-                flags=re.IGNORECASE
-            )
-
-            if id_match:
-
-                arxiv_id = id_match.group(1)
-
-
-        # -------------------------------------------------
-        # CLEAN ID
-        # -------------------------------------------------
-
-        if arxiv_id:
-
-            arxiv_id = arxiv_id.strip()
-
-            arxiv_id = arxiv_id.replace(
-                ".pdf",
-                ""
-            )
-
-            arxiv_id = arxiv_id.replace(
-                "&amp;",
-                ""
-            )
-
-
-        # -------------------------------------------------
-        # BUILD PDF URL
-        # -------------------------------------------------
-
-        if arxiv_id:
-
-            pdf_url = (
-                f"https://arxiv.org/pdf/"
-                f"{arxiv_id}.pdf"
-            )
-
-        else:
-
-            pdf_url = None
-
 
         # -------------------------------------------------
         # AUTHORS
@@ -201,46 +227,113 @@ def search_arxiv(topic: str) -> list:
 
         authors = []
 
-        author_matches = re.findall(
-            r"<name>(.*?)</name>",
-            entry,
-            flags=re.DOTALL
-        )
+        for author in entry.findall(
+            f"{ATOM_NS}author"
+        ):
 
-        for author in author_matches:
-
-            authors.append(
-                re.sub(
-                    r"\s+",
-                    " ",
-                    author
-                ).strip()
+            name = author.find(
+                f"{ATOM_NS}name"
             )
 
+            if (
+                name is not None
+                and name.text
+            ):
+
+                authors.append(
+                    name.text.strip()
+                )
 
         # -------------------------------------------------
-        # ONLY ADD VALID PAPER
+        # ARXIV ID
         # -------------------------------------------------
 
-        if pdf_url:
+        id_element = entry.find(
+            f"{ATOM_NS}id"
+        )
 
-            papers.append({
+        arxiv_id = ""
 
+        if (
+            id_element is not None
+            and id_element.text
+        ):
+
+            entry_id = id_element.text.strip()
+
+            if "/abs/" in entry_id:
+
+                arxiv_id = (
+                    entry_id
+                    .split("/abs/")[-1]
+                )
+
+        # -------------------------------------------------
+        # PDF LINK
+        # -------------------------------------------------
+
+        pdf_url = None
+
+        for link in entry.findall(
+            f"{ATOM_NS}link"
+        ):
+
+            link_title = link.get(
+                "title"
+            )
+
+            link_type = link.get(
+                "type"
+            )
+
+            href = link.get(
+                "href"
+            )
+
+            if (
+                link_title == "pdf"
+                or link_type == "application/pdf"
+            ):
+
+                pdf_url = href
+
+                break
+
+        # -------------------------------------------------
+        # FALLBACK
+        # -------------------------------------------------
+
+        if not pdf_url and arxiv_id:
+
+            pdf_url = (
+                "https://arxiv.org/pdf/"
+                + arxiv_id
+                + ".pdf"
+            )
+
+        # -------------------------------------------------
+        # ADD PAPER
+        # -------------------------------------------------
+
+        papers.append(
+            {
                 "source": "arXiv",
 
                 "title": title,
 
+                "arxiv_id": arxiv_id,
+
                 "pdf_url": pdf_url,
 
                 "authors": authors
-            })
-
+            }
+        )
 
     return papers
 
 
 # =========================================================
-# MCP SERVER
+# START MCP SERVER
 # =========================================================
 
 if __name__ == "__main__":
