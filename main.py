@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import requests
 from typing import TypedDict
 
 from dotenv import load_dotenv
@@ -16,6 +17,55 @@ from paper_reader import store_paper, search_paper
 # =========================================================
 
 load_dotenv()
+
+
+# =========================================================
+# DYNAMIC MODEL SELECTOR (NEW)
+# =========================================================
+
+def get_active_groq_model():
+    """Dynamically fetches the best available Groq model for your API key."""
+    api_key = os.getenv("GROQ_API_KEY")
+    fallback = "llama3-8b-8192" # Absolute fallback
+    
+    if not api_key:
+        return fallback
+        
+    try:
+        response = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5
+        )
+        if response.status_code == 200:
+            models = response.json().get("data", [])
+            active_models = [m["id"] for m in models]
+            
+            print(f"\n[INFO] Found {len(active_models)} active models on your Groq tier.")
+            
+            # Prioritized list of models good for JSON extraction
+            preferred = [
+                "llama-3.1-8b-instant",
+                "llama-3.2-11b-vision-preview",
+                "llama-3.2-3b-preview",
+                "llama3-8b-8192",
+                "gemma-7b-it"
+            ]
+            
+            for pref in preferred:
+                if pref in active_models:
+                    print(f"[INFO] Auto-selected model: {pref}\n")
+                    return pref
+            
+            # If none of our preferred are there, pick the first available one
+            if active_models:
+                print(f"[INFO] Auto-selected fallback model: {active_models[0]}\n")
+                return active_models[0]
+                
+    except Exception as e:
+        print(f"\n[WARNING] Could not fetch models dynamically: {e}")
+        
+    return fallback
 
 
 # =========================================================
@@ -39,9 +89,8 @@ client = MultiServerMCPClient(
 # LLM
 # =========================================================
 
-# FIX 1: Increased max_tokens and enabled strict JSON Mode
 llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model=get_active_groq_model(), # Calls the dynamic fetcher
     api_key=os.getenv("GROQ_API_KEY"),
     max_tokens=6000,
     model_kwargs={"response_format": {"type": "json_object"}} 
@@ -65,7 +114,6 @@ class MyState(TypedDict):
 # =========================================================
 
 def parse_json(text):
-
     if not text:
         return {}
 
@@ -346,7 +394,6 @@ async def research_agent_node(state):
         for field, text in evidence.items():
             evidence_text += f"\n\n{field.upper()}:\n{str(text)[:1200]}"
 
-        # FIX 2: Added explicit conciseness instructions
         prompt = f"""
 Analyze this research paper using ONLY the retrieved evidence.
 Do not use outside knowledge. Do not invent information.
