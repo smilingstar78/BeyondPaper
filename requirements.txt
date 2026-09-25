@@ -8,5 +8,6 @@ langchain-groq
 langgraph
 langchain-mcp-adapters
 mcp
-pypdf
 chromadb
+pypdf
+langchain-text-splitters
