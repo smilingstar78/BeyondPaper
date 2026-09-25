@@ -1,11 +1,23 @@
 import os
-import requests
 import hashlib
+import requests
 import chromadb
 
 from io import BytesIO
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+# =========================================================
+# ENVIRONMENT
+# =========================================================
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+GEMINI_EMBEDDING_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/"
+    "models/gemini-embedding-001:batchEmbedContents"
+)
 
 
 # =========================================================
@@ -20,36 +32,130 @@ collection = chroma_client.get_or_create_collection(
 
 
 # =========================================================
-# EMBEDDINGS
+# GEMINI EMBEDDINGS
 # =========================================================
 
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
+def create_document_embeddings(texts, title):
 
-EMBEDDING_URL = os.getenv("EMBEDDING_URL")
+    if not GEMINI_API_KEY:
+        raise ValueError(
+            "GEMINI_API_KEY is not configured."
+        )
+
+    embeddings = []
+
+    # Gemini API request sizes should stay reasonable.
+    batch_size = 50
+
+    for start in range(0, len(texts), batch_size):
+
+        batch = texts[start:start + batch_size]
+
+        requests_body = []
+
+        for text in batch:
+
+            requests_body.append(
+                {
+                    "model": "models/gemini-embedding-001",
+                    "content": {
+                        "parts": [
+                            {
+                                "text": (
+                                    f"title: {title} | "
+                                    f"text: {text}"
+                                )
+                            }
+                        ]
+                    },
+                    "taskType": "RETRIEVAL_DOCUMENT",
+                    "outputDimensionality": 768
+                }
+            )
+
+        response = requests.post(
+            GEMINI_EMBEDDING_URL,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY
+            },
+            json={
+                "requests": requests_body
+            },
+            timeout=60
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        batch_embeddings = data.get(
+            "embeddings",
+            []
+        )
+
+        if len(batch_embeddings) != len(batch):
+
+            raise ValueError(
+                "Gemini returned an unexpected "
+                "number of embeddings."
+            )
+
+        embeddings.extend(
+            [
+                item["values"]
+                for item in batch_embeddings
+            ]
+        )
+
+    return embeddings
 
 
-def create_embeddings(texts):
+def create_query_embedding(question):
+
+    if not GEMINI_API_KEY:
+        raise ValueError(
+            "GEMINI_API_KEY is not configured."
+        )
+
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/gemini-embedding-001:embedContent"
+    )
 
     response = requests.post(
-        EMBEDDING_URL,
+        url,
         headers={
-            "Authorization": f"Bearer {EMBEDDING_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
         },
         json={
-            "input": texts
+            "model": "models/gemini-embedding-001",
+            "content": {
+                "parts": [
+                    {
+                        "text": question
+                    }
+                ]
+            },
+            "taskType": "RETRIEVAL_QUERY",
+            "outputDimensionality": 768
         },
-        timeout=60
+        timeout=30
     )
 
     response.raise_for_status()
 
     data = response.json()
 
-    return [
-        item["embedding"]
-        for item in data["data"]
-    ]
+    embedding = data.get("embedding")
+
+    if not embedding:
+        raise ValueError(
+            "Gemini did not return a query embedding."
+        )
+
+    return embedding["values"]
 
 
 # =========================================================
@@ -108,10 +214,12 @@ def read_pdf(pdf_url):
 
             if page_text:
 
-                pages.append({
-                    "page": page_number,
-                    "text": page_text
-                })
+                pages.append(
+                    {
+                        "page": page_number,
+                        "text": page_text
+                    }
+                )
 
         except Exception as e:
 
@@ -150,10 +258,12 @@ def chunk_text(pages):
 
         for chunk in chunks:
 
-            all_chunks.append({
-                "text": chunk,
-                "page": page["page"]
-            })
+            all_chunks.append(
+                {
+                    "text": chunk,
+                    "page": page["page"]
+                }
+            )
 
     return all_chunks
 
@@ -205,37 +315,31 @@ def store_paper(title, pdf_url):
     ]
 
     print(
-        "Creating embeddings..."
+        "Creating Gemini embeddings..."
     )
 
-    vectors = create_embeddings(
-        documents
+    vectors = create_document_embeddings(
+        documents,
+        title
     )
 
     collection.upsert(
-
         ids=ids,
-
         documents=documents,
-
         embeddings=vectors,
-
         metadatas=[
-
             {
                 "title": title,
                 "pdf_url": pdf_url,
                 "page": chunk["page"],
                 "chunk_index": i
             }
-
             for i, chunk in enumerate(chunks)
         ]
     )
 
     print(
-        f"Stored {len(chunks)} "
-        f"chunks in ChromaDB."
+        f"Stored {len(chunks)} chunks."
     )
 
 
@@ -249,20 +353,19 @@ def search_paper(
     k=2
 ):
 
-    query_embedding = create_embeddings(
-        [question]
-    )[0]
-
     try:
 
-        results = collection.query(
+        query_embedding = (
+            create_query_embedding(
+                question
+            )
+        )
 
+        results = collection.query(
             query_embeddings=[
                 query_embedding
             ],
-
             n_results=k,
-
             where={
                 "title": title
             }
