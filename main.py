@@ -16,17 +16,18 @@ from paper_reader import store_paper, search_paper
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# =========================================================
-# GROQ MODEL
-# =========================================================
-
 def get_groq_model():
 
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
+
+    print(
+        "GROQ_API_KEY exists:",
+        bool(api_key)
+    )
 
     if not api_key:
         raise RuntimeError(
-            "The server has no GROQ_API_KEY."
+            "GROQ_API_KEY is not available in the Vercel runtime."
         )
 
     try:
@@ -40,14 +41,23 @@ def get_groq_model():
 
         response.raise_for_status()
 
-        models = response.json().get("data", [])
+        models = response.json().get(
+            "data",
+            []
+        )
 
         available_models = {
             model.get("id")
             for model in models
         }
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            "Groq model check failed:",
+            error
+        )
+
         available_models = set()
 
     preferred_models = [
@@ -60,6 +70,7 @@ def get_groq_model():
     selected_model = None
 
     for model in preferred_models:
+
         if model in available_models:
             selected_model = model
             break
@@ -73,10 +84,6 @@ def get_groq_model():
         temperature=0
     )
 
-
-# =========================================================
-# MCP
-# =========================================================
 
 TOOLS_PATH = os.path.join(
     BASE_DIR,
@@ -95,10 +102,6 @@ client = MultiServerMCPClient(
 )
 
 
-# =========================================================
-# STATE
-# =========================================================
-
 class MyState(TypedDict):
 
     topic: str
@@ -113,10 +116,6 @@ class MyState(TypedDict):
 
     novelty_assessments: list
 
-
-# =========================================================
-# OPENALEX
-# =========================================================
 
 async def openalex_node(state: MyState):
 
@@ -142,10 +141,6 @@ async def openalex_node(state: MyState):
     }
 
 
-# =========================================================
-# ARXIV
-# =========================================================
-
 async def arxiv_node(state: MyState):
 
     tools = await client.get_tools()
@@ -170,10 +165,6 @@ async def arxiv_node(state: MyState):
     }
 
 
-# =========================================================
-# RELEVANT PAPER FINDER
-# =========================================================
-
 async def relevant_paper_finder(
     state: MyState
 ):
@@ -187,6 +178,7 @@ async def relevant_paper_finder(
     )
 
     if not papers:
+
         return {
             "relevant_papers": []
         }
@@ -253,10 +245,6 @@ Select at most 5 papers.
     }
 
 
-# =========================================================
-# PAPER READER
-# =========================================================
-
 async def paper_reader_node(
     state: MyState
 ):
@@ -267,6 +255,7 @@ async def paper_reader_node(
     )
 
     if not relevant_papers:
+
         return {
             "paper_analysis": []
         }
@@ -303,6 +292,7 @@ async def paper_reader_node(
             )
 
             if result:
+
                 analyses.append(
                     {
                         "title": title,
@@ -311,16 +301,13 @@ async def paper_reader_node(
                 )
 
         except Exception:
+
             continue
 
     return {
         "paper_analysis": analyses
     }
 
-
-# =========================================================
-# RESEARCH AGENT
-# =========================================================
 
 async def research_agent_node(
     state: MyState
@@ -334,6 +321,7 @@ async def research_agent_node(
     )
 
     if not analyses:
+
         return {
             "novelty_assessments": []
         }
@@ -410,10 +398,6 @@ Return ONLY valid JSON:
     }
 
 
-# =========================================================
-# GAP ANALYZER
-# =========================================================
-
 async def gap_analyzer_node(
     state: MyState
 ):
@@ -426,6 +410,7 @@ async def gap_analyzer_node(
     )
 
     if not assessments:
+
         return {
             "novelty_assessments": []
         }
@@ -503,10 +488,6 @@ Return ONLY valid JSON:
         )
     }
 
-
-# =========================================================
-# GRAPH
-# =========================================================
 
 graph = StateGraph(
     MyState
