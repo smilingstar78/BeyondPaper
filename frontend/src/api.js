@@ -1,4 +1,5 @@
 const API_URL =
+  import.meta.env.VITE_API_BASE_URL ||
   "https://beyond-paper-inky.vercel.app";
 
 
@@ -11,6 +12,7 @@ export async function fetchHealth(signal) {
     }
   );
 
+
   if (!res.ok) {
 
     throw new Error(
@@ -18,6 +20,7 @@ export async function fetchHealth(signal) {
     );
 
   }
+
 
   return res.json();
 }
