@@ -9,3 +9,4 @@ langgraph
 langchain-mcp-adapters
 mcp
 pypdf
+chromadb
