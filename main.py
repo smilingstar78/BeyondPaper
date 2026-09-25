@@ -1080,4 +1080,9 @@ graph.add_edge(
     END
 )
 
-app = graph.compile()
+
+# =========================================================
+# COMPILED RESEARCH GRAPH
+# =========================================================
+
+research_graph = graph.compile()
