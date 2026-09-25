@@ -1,4 +1,3 @@
-import asyncio
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -10,7 +9,7 @@ from main import app as research_graph
 # FASTAPI
 # =========================================================
 
-api = FastAPI(
+app = FastAPI(
     title="BeyondPaper API"
 )
 
@@ -28,7 +27,7 @@ class ResearchRequest(BaseModel):
 # HEALTH CHECK
 # =========================================================
 
-@api.get("/")
+@app.get("/")
 async def root():
 
     return {
@@ -41,7 +40,7 @@ async def root():
 # RESEARCH
 # =========================================================
 
-@api.post("/research")
+@app.post("/research")
 async def research(
     request: ResearchRequest
 ):
@@ -51,8 +50,7 @@ async def research(
     if not topic:
 
         return {
-            "error":
-                "Research topic is required."
+            "error": "Research topic is required."
         }
 
     initial_state = {
@@ -77,9 +75,8 @@ async def research(
     return {
         "topic": topic,
 
-        "assessments":
-            final_state.get(
-                "novelty_assessments",
-                []
-            )
+        "assessments": final_state.get(
+            "novelty_assessments",
+            []
+        )
     }
