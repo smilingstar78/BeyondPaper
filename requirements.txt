@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sse-starlette
+python-dotenv
+requests
+langchain
+langchain-groq
+langgraph
+langchain-mcp-adapters
+mcp
+chromadb
+sentence-transformers
+pypdf
