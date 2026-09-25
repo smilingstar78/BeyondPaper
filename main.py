@@ -20,7 +20,7 @@ load_dotenv()
 
 
 # =========================================================
-# DYNAMIC MODEL SELECTOR (NEW)
+# DYNAMIC MODEL SELECTOR
 # =========================================================
 
 def get_active_groq_model():
@@ -43,7 +43,6 @@ def get_active_groq_model():
             
             print(f"\n[INFO] Found {len(active_models)} active models on your Groq tier.")
             
-            # Prioritized list of models good for JSON extraction
             preferred = [
                 "llama-3.1-8b-instant",
                 "llama-3.2-11b-vision-preview",
@@ -57,7 +56,6 @@ def get_active_groq_model():
                     print(f"[INFO] Auto-selected model: {pref}\n")
                     return pref
             
-            # If none of our preferred are there, pick the first available one
             if active_models:
                 print(f"[INFO] Auto-selected fallback model: {active_models[0]}\n")
                 return active_models[0]
@@ -90,9 +88,9 @@ client = MultiServerMCPClient(
 # =========================================================
 
 llm = ChatGroq(
-    model=get_active_groq_model(), # Calls the dynamic fetcher
+    model=get_active_groq_model(),
     api_key=os.getenv("GROQ_API_KEY"),
-    max_tokens=6000,
+    max_tokens=3500,  # Set within the 4096 limit imposed by Groq API
     model_kwargs={"response_format": {"type": "json_object"}} 
 )
 
@@ -107,6 +105,7 @@ class MyState(TypedDict):
     open_alex: list
     relevant_papers: list
     paper_analysis: list
+    novelty_assessments: list
 
 
 # =========================================================
@@ -409,7 +408,7 @@ You must return ONLY a single valid JSON object.
 Extract the answers from the evidence and place them as strings in the corresponding JSON fields. 
 If information is missing, write "Not found in retrieved evidence."
 
-Format your output exactly like this (replace the descriptions with actual extracted text):
+Format your output exactly like this:
 {{
     "research_problem": "description of the problem...",
     "objectives": "description of the objectives...",
@@ -425,11 +424,9 @@ Format your output exactly like this (replace the descriptions with actual extra
 
         try:
             response = await llm.ainvoke(prompt)
-            print(f"\n[DEBUG] Raw LLM Output for {title[:30]}... :\n{response.content[:300]}...\n")
             analysis = parse_json(response.content)
 
             if not isinstance(analysis, dict) or not analysis:
-                print("[DEBUG] JSON parsing failed or returned empty.")
                 analysis = {"error": "Failed to parse JSON", "raw_response": response.content}
 
             analysis["paper"] = title
@@ -443,6 +440,79 @@ Format your output exactly like this (replace the descriptions with actual extra
 
 
 # =========================================================
+# RESEARCH GAP & NOVELTY CHECK NODE
+# =========================================================
+
+async def gap_analyzer_node(state):
+    print("\nEvaluating Literature & Generating Novelty Assessments...")
+    topic = state.get("topic", "")
+    analyses = state.get("paper_analysis", [])
+
+    if not analyses:
+        return {"novelty_assessments": []}
+
+    summaries_text = ""
+    evidence_papers = []
+    for idx, item in enumerate(analyses, start=1):
+        if "error" in item:
+            continue
+        paper_title = item.get('paper', 'Unknown')
+        evidence_papers.append(paper_title)
+        summaries_text += f"""
+--- PAPER {idx}: {paper_title} ---
+- Research Problem: {item.get('research_problem', 'N/A')}
+- Method: {item.get('method', 'N/A')}
+- Results: {item.get('results', 'N/A')}
+- Limitations: {item.get('limitations', 'N/A')}
+- Future Work: {item.get('future_work', 'N/A')}
+"""
+
+    prompt = f"""
+You are an expert AI research advisor performing a Novelty and Existing-Work Analysis.
+
+Target Research Topic Domain: {topic}
+
+Extracted Analysis from Retrieved Literature:
+{summaries_text}
+
+Task:
+Formulate 2 to 3 candidate research topics/titles based on open gaps in the retrieved literature.
+For each topic, perform a similarity analysis against the retrieved evidence papers.
+
+Return ONLY a valid JSON object formatted as follows:
+{{
+    "assessments": [
+        {{
+            "topic_number": 1,
+            "topic_title": "Hierarchical Retrieval-Augmented Memory Networks for Long-Horizon Planning in Agentic AI",
+            "status": "Potentially underexplored",
+            "similarity_analysis": "Existing studies investigate RAG, memory, and long-horizon planning, but the retrieved literature does not clearly show a unified hierarchical memory architecture evaluated specifically for long-horizon agentic planning.",
+            "remaining_gap": "Scalable integration of hierarchical memory with long-horizon planning remains insufficiently evaluated.",
+            "evidence_confidence": "Medium",
+            "evidence_papers": {json.dumps(evidence_papers)}
+        }}
+    ]
+}}
+
+Guidelines:
+- "status": Choose from "Potentially underexplored", "Partially addressed", or "High overlap in literature".
+- "evidence_confidence": Choose from "High", "Medium", or "Low".
+- "similarity_analysis": Summarize how existing retrieved work relates and where it falls short.
+- "remaining_gap": State the exact gap cleanly in 1-2 sentences.
+"""
+
+    try:
+        response = await llm.ainvoke(prompt)
+        res_json = parse_json(response.content)
+        assessments = res_json.get("assessments", [])
+        return {"novelty_assessments": assessments}
+
+    except Exception as e:
+        print(f"\n[ERROR] Novelty Assessment failed: {e}")
+        return {"novelty_assessments": []}
+
+
+# =========================================================
 # GRAPH
 # =========================================================
 
@@ -452,13 +522,15 @@ graph.add_node("arxiv", arxiv_node)
 graph.add_node("relevant_paper_finder", relevant_paper_finder)
 graph.add_node("paper_reader", paper_reader_node)
 graph.add_node("research_agent", research_agent_node)
+graph.add_node("gap_analyzer", gap_analyzer_node)
 
 graph.add_edge(START, "openalex")
 graph.add_edge("openalex", "arxiv")
 graph.add_edge("arxiv", "relevant_paper_finder")
 graph.add_edge("relevant_paper_finder", "paper_reader")
 graph.add_edge("paper_reader", "research_agent")
-graph.add_edge("research_agent", END)
+graph.add_edge("research_agent", "gap_analyzer")
+graph.add_edge("gap_analyzer", END)
 app = graph.compile()
 
 
@@ -478,40 +550,39 @@ async def main():
         "arxiv_papers": [],
         "open_alex": [],
         "relevant_papers": [],
-        "paper_analysis": []
+        "paper_analysis": [],
+        "novelty_assessments": []
     }
 
     final_state = await app.ainvoke(initial_state)
 
+    assessments = final_state.get("novelty_assessments", [])
+
     print("\n" + "=" * 70)
-    print("FINAL RESEARCH ANALYSIS")
+    print("EXISTING-WORK / NOVELTY CHECK")
     print("=" * 70)
 
-    analyses = final_state.get("paper_analysis", [])
-
-    if not analyses:
-        print("\nNo paper analysis was generated.")
+    if not assessments:
+        print("\nNo novelty assessments generated.")
         return
 
-    for number, analysis in enumerate(analyses, start=1):
-        print(f"\n{'-' * 70}")
-        print(f"PAPER {number}")
-        print(f"{'-' * 70}")
-        print(f"\nPaper:\n{analysis.get('paper', '')}")
-
-        if "error" in analysis:
-            print(f"\n[!] Error during extraction: {analysis.get('error')}")
-            print(f"Raw Response: {analysis.get('raw_response', '')}")
-            continue
-
-        print(f"\nResearch Problem:\n{analysis.get('research_problem', 'Not found')}")
-        print(f"\nObjectives:\n{analysis.get('objectives', 'Not found')}")
-        print(f"\nMethod:\n{analysis.get('method', 'Not found')}")
-        print(f"\nDataset:\n{analysis.get('dataset', 'Not found')}")
-        print(f"\nResults:\n{analysis.get('results', 'Not found')}")
-        print(f"\nMetrics:\n{analysis.get('metrics', 'Not found')}")
-        print(f"\nLimitations:\n{analysis.get('limitations', 'Not found')}")
-        print(f"\nFuture Work:\n{analysis.get('future_work', 'Not found')}")
+    for item in assessments:
+        print(f"\nTopic {item.get('topic_number', 1)}:")
+        print(f"{item.get('topic_title', '')}\n")
+        print("Status:")
+        print(f"{item.get('status', 'Potentially underexplored')}\n")
+        print("Similarity Analysis:")
+        print(f"{item.get('similarity_analysis', '')}\n")
+        print("Remaining Gap:")
+        print(f"{item.get('remaining_gap', '')}\n")
+        print("Evidence Confidence:")
+        print(f"{item.get('evidence_confidence', 'Medium')}\n")
+        print("Evidence Papers:")
+        for paper in item.get("evidence_papers", []):
+            print(f"- {paper}")
+        print("\nNote:")
+        print("This assessment is based on the retrieved literature and does not establish definitive novelty.")
+        print("-" * 70)
 
 if __name__ == "__main__":
     import asyncio
