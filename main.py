@@ -5,111 +5,77 @@ import requests
 
 from typing import TypedDict
 
-from dotenv import load_dotenv
-
 from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
 from langgraph.graph import StateGraph, START, END
 
-from paper_reader import (
-    store_paper,
-    search_paper
-)
+from paper_reader import store_paper, search_paper
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # =========================================================
-# ENVIRONMENT
+# GROQ MODEL
 # =========================================================
 
-load_dotenv()
+def get_groq_model():
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
-
-# =========================================================
-# DYNAMIC GROQ MODEL
-# =========================================================
-
-def get_active_groq_model():
-
-    api_key = os.getenv(
-        "GROQ_API_KEY"
-    )
-
-    fallback = "llama-3.1-8b-instant"
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-        return fallback
+        raise RuntimeError(
+            "The server has no GROQ_API_KEY."
+        )
 
     try:
-
         response = requests.get(
             "https://api.groq.com/openai/v1/models",
             headers={
-                "Authorization":
-                    f"Bearer {api_key}"
+                "Authorization": f"Bearer {api_key}"
             },
-            timeout=5
+            timeout=10
         )
 
-        if response.status_code == 200:
+        response.raise_for_status()
 
-            models = response.json().get(
-                "data",
-                []
-            )
+        models = response.json().get("data", [])
 
-            active_models = [
-                m["id"]
-                for m in models
-                if isinstance(m, dict)
-                and isinstance(
-                    m.get("id"),
-                    str
-                )
-            ]
+        available_models = {
+            model.get("id")
+            for model in models
+        }
 
-            preferred = [
-                "llama-3.1-8b-instant",
-                "llama-3.3-70b-versatile",
-                "openai/gpt-oss-120b",
-                "openai/gpt-oss-20b"
-            ]
+    except Exception:
+        available_models = set()
 
-            for model in preferred:
+    preferred_models = [
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b"
+    ]
 
-                if model in active_models:
+    selected_model = None
 
-                    print(
-                        f"[INFO] "
-                        f"Using Groq model: "
-                        f"{model}"
-                    )
+    for model in preferred_models:
+        if model in available_models:
+            selected_model = model
+            break
 
-                    return model
+    if selected_model is None:
+        selected_model = "llama-3.1-8b-instant"
 
-    except Exception as e:
-
-        print(
-            f"[WARNING] "
-            f"Could not fetch Groq models: "
-            f"{e}"
-        )
-
-    return fallback
+    return ChatGroq(
+        model=selected_model,
+        api_key=api_key,
+        temperature=0
+    )
 
 
 # =========================================================
-# ACTIVE MODEL
-# =========================================================
-
-ACTIVE_MODEL = get_active_groq_model()
-
-
-# =========================================================
-# MCP CLIENT
+# MCP
 # =========================================================
 
 TOOLS_PATH = os.path.join(
@@ -117,60 +83,13 @@ TOOLS_PATH = os.path.join(
     "tools.py"
 )
 
+
 client = MultiServerMCPClient(
     {
         "research_agent": {
             "transport": "stdio",
             "command": "python",
-            "args": [
-                TOOLS_PATH
-            ]
-        }
-    }
-)
-
-
-# =========================================================
-# LLMs
-# =========================================================
-
-selection_llm = ChatGroq(
-    model=ACTIVE_MODEL,
-    api_key=os.getenv(
-        "GROQ_API_KEY"
-    ),
-    max_tokens=500,
-    model_kwargs={
-        "response_format": {
-            "type": "json_object"
-        }
-    }
-)
-
-
-analysis_llm = ChatGroq(
-    model=ACTIVE_MODEL,
-    api_key=os.getenv(
-        "GROQ_API_KEY"
-    ),
-    max_tokens=1000,
-    model_kwargs={
-        "response_format": {
-            "type": "json_object"
-        }
-    }
-)
-
-
-gap_llm = ChatGroq(
-    model=ACTIVE_MODEL,
-    api_key=os.getenv(
-        "GROQ_API_KEY"
-    ),
-    max_tokens=1200,
-    model_kwargs={
-        "response_format": {
-            "type": "json_object"
+            "args": [TOOLS_PATH]
         }
     }
 )
@@ -183,310 +102,40 @@ gap_llm = ChatGroq(
 class MyState(TypedDict):
 
     topic: str
+
     arxiv_papers: list
+
     open_alex: list
+
     relevant_papers: list
+
     paper_analysis: list
+
     novelty_assessments: list
-
-
-# =========================================================
-# JSON PARSER
-# =========================================================
-
-def parse_json(text):
-
-    if not text:
-        return {}
-
-    if isinstance(
-        text,
-        (dict, list)
-    ):
-        return text
-
-    text = str(text).strip()
-
-    try:
-        return json.loads(text)
-
-    except Exception:
-        pass
-
-    text = re.sub(
-        r"```json",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    text = re.sub(
-        r"```",
-        "",
-        text
-    )
-
-    text = text.strip()
-
-    try:
-        return json.loads(text)
-
-    except Exception:
-        pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-
-    if start != -1 and end != -1:
-
-        try:
-
-            return json.loads(
-                text[start:end + 1]
-            )
-
-        except Exception:
-            pass
-
-    return {}
-
-
-# =========================================================
-# MCP RESULT CONVERTER
-# =========================================================
-
-def convert_tool_result(result):
-
-    parsed_papers = []
-
-    if isinstance(result, str):
-
-        parsed = parse_json(result)
-
-        if isinstance(parsed, list):
-            return parsed
-
-        if isinstance(parsed, dict):
-            return [parsed]
-
-        return []
-
-    if hasattr(result, "content"):
-
-        return convert_tool_result(
-            result.content
-        )
-
-    if isinstance(result, list):
-
-        for item in result:
-
-            if (
-                isinstance(item, dict)
-                and (
-                    "title" in item
-                    or "pdf_url" in item
-                )
-            ):
-
-                parsed_papers.append(item)
-
-            elif (
-                isinstance(item, dict)
-                and "text" in item
-            ):
-
-                parsed = parse_json(
-                    item["text"]
-                )
-
-                if isinstance(
-                    parsed,
-                    list
-                ):
-
-                    parsed_papers.extend(
-                        parsed
-                    )
-
-                elif isinstance(
-                    parsed,
-                    dict
-                ):
-
-                    parsed_papers.append(
-                        parsed
-                    )
-
-            elif hasattr(item, "text"):
-
-                parsed = parse_json(
-                    item.text
-                )
-
-                if isinstance(
-                    parsed,
-                    list
-                ):
-
-                    parsed_papers.extend(
-                        parsed
-                    )
-
-                elif isinstance(
-                    parsed,
-                    dict
-                ):
-
-                    parsed_papers.append(
-                        parsed
-                    )
-
-            elif isinstance(
-                item,
-                str
-            ):
-
-                parsed = parse_json(item)
-
-                if isinstance(
-                    parsed,
-                    list
-                ):
-
-                    parsed_papers.extend(
-                        parsed
-                    )
-
-                elif isinstance(
-                    parsed,
-                    dict
-                ):
-
-                    parsed_papers.append(
-                        parsed
-                    )
-
-        return parsed_papers
-
-    if isinstance(result, dict):
-        return [result]
-
-    return []
-
-
-# =========================================================
-# TITLE NORMALIZATION
-# =========================================================
-
-def normalize_title(title):
-
-    if not isinstance(
-        title,
-        str
-    ):
-        return ""
-
-    title = title.lower().strip()
-
-    title = re.sub(
-        r"[^a-z0-9\s]",
-        "",
-        title
-    )
-
-    title = re.sub(
-        r"\s+",
-        " ",
-        title
-    )
-
-    return title
-
-
-# =========================================================
-# DEDUPLICATION
-# =========================================================
-
-def deduplicate_papers(papers):
-
-    unique_papers = []
-
-    seen_titles = set()
-
-    for paper in papers:
-
-        if not isinstance(
-            paper,
-            dict
-        ):
-            continue
-
-        title = paper.get(
-            "title",
-            ""
-        )
-
-        normalized = normalize_title(
-            title
-        )
-
-        if not normalized:
-            continue
-
-        if normalized in seen_titles:
-            continue
-
-        seen_titles.add(
-            normalized
-        )
-
-        unique_papers.append(
-            paper
-        )
-
-    return unique_papers
 
 
 # =========================================================
 # OPENALEX
 # =========================================================
 
-async def openalex_node(state):
-
-    print(
-        "\nSearching OpenAlex..."
-    )
+async def openalex_node(state: MyState):
 
     tools = await client.get_tools()
 
     search_openalex = next(
-        (
-            tool
-            for tool in tools
-            if tool.name ==
-            "search_openalex"
-        ),
-        None
+        tool
+        for tool in tools
+        if tool.name == "search_openalex"
     )
 
-    if search_openalex is None:
-
-        raise ValueError(
-            "search_openalex tool "
-            "was not found."
-        )
-
-    result = await search_openalex.ainvoke(
+    papers = await search_openalex.ainvoke(
         {
-            "topic":
-                state["topic"]
+            "topic": state["topic"]
         }
     )
 
-    papers = convert_tool_result(
-        result
-    )
+    if not papers:
+        papers = []
 
     return {
         "open_alex": papers
@@ -497,41 +146,24 @@ async def openalex_node(state):
 # ARXIV
 # =========================================================
 
-async def arxiv_node(state):
-
-    print(
-        "\nSearching arXiv..."
-    )
+async def arxiv_node(state: MyState):
 
     tools = await client.get_tools()
 
     search_arxiv = next(
-        (
-            tool
-            for tool in tools
-            if tool.name ==
-            "search_arxiv"
-        ),
-        None
+        tool
+        for tool in tools
+        if tool.name == "search_arxiv"
     )
 
-    if search_arxiv is None:
-
-        raise ValueError(
-            "search_arxiv tool "
-            "was not found."
-        )
-
-    result = await search_arxiv.ainvoke(
+    papers = await search_arxiv.ainvoke(
         {
-            "topic":
-                state["topic"]
+            "topic": state["topic"]
         }
     )
 
-    papers = convert_tool_result(
-        result
-    )
+    if not papers:
+        papers = []
 
     return {
         "arxiv_papers": papers
@@ -539,146 +171,85 @@ async def arxiv_node(state):
 
 
 # =========================================================
-# FIND RELEVANT PAPERS
+# RELEVANT PAPER FINDER
 # =========================================================
 
-async def relevant_paper_finder(state):
+async def relevant_paper_finder(
+    state: MyState
+):
 
-    print(
-        "\nFinding relevant papers..."
-    )
+    groq = get_groq_model()
 
-    all_papers = (
-        state.get(
-            "open_alex",
-            []
-        )
+    papers = (
+        state.get("open_alex", [])
         +
-        state.get(
-            "arxiv_papers",
-            []
-        )
+        state.get("arxiv_papers", [])
     )
 
-    pdf_papers = []
-
-    for paper in all_papers:
-
-        if not isinstance(
-            paper,
-            dict
-        ):
-            continue
-
-        pdf_url = paper.get(
-            "pdf_url"
-        )
-
-        if (
-            isinstance(
-                pdf_url,
-                str
-            )
-            and pdf_url.strip()
-        ):
-
-            pdf_papers.append(
-                paper
-            )
-
-    pdf_papers = deduplicate_papers(
-        pdf_papers
-    )
-
-    if not pdf_papers:
-
+    if not papers:
         return {
             "relevant_papers": []
         }
 
-    paper_list = ""
-
-    for index, paper in enumerate(
-        pdf_papers
-    ):
-
-        paper_list += (
-            f"{index}: "
-            f"{paper.get('title', 'Unknown')}\n"
-        )
+    paper_text = json.dumps(
+        papers,
+        ensure_ascii=False
+    )
 
     prompt = f"""
-Select the 3 most relevant research papers
-for this research topic.
+You are a research paper selection assistant.
 
 Research topic:
-
 {state["topic"]}
 
-Available papers:
+Below are papers retrieved from OpenAlex and arXiv:
 
-{paper_list}
+{paper_text}
 
-Choose different papers.
+Select the papers that are genuinely relevant to the research topic.
 
-Return ONLY valid JSON.
-
-Format:
+Return ONLY valid JSON in this format:
 
 {{
-    "selected_indexes": [0, 1, 2]
+    "relevant_papers": [
+        {{
+            "title": "paper title",
+            "url": "paper url",
+            "reason": "why this paper is relevant"
+        }}
+    ]
 }}
+
+Select at most 5 papers.
 """
+
+    response = await groq.ainvoke(
+        prompt
+    )
+
+    content = response.content
 
     try:
 
-        response = await selection_llm.ainvoke(
-            prompt
-        )
+        content = re.sub(
+            r"```json|```",
+            "",
+            content
+        ).strip()
 
-        result = parse_json(
-            response.content
-        )
+        result = json.loads(content)
 
     except Exception:
 
-        return {
-            "relevant_papers":
-                pdf_papers[:3]
+        result = {
+            "relevant_papers": []
         }
 
-    indexes = result.get(
-        "selected_indexes",
-        []
-    )
-
-    selected = []
-
-    for index in indexes:
-
-        try:
-            index = int(index)
-        except Exception:
-            continue
-
-        if (
-            0 <= index <
-            len(pdf_papers)
-        ):
-
-            if pdf_papers[index] not in selected:
-
-                selected.append(
-                    pdf_papers[index]
-                )
-
-    if not selected:
-
-        selected = pdf_papers[:3]
-
     return {
-        "relevant_papers":
-            selected[:3]
+        "relevant_papers": result.get(
+            "relevant_papers",
+            []
+        )
     }
 
 
@@ -686,207 +257,76 @@ Format:
 # PAPER READER
 # =========================================================
 
-async def paper_reader_node(state):
+async def paper_reader_node(
+    state: MyState
+):
 
-    print(
-        "\nReading selected papers..."
-    )
-
-    papers = state.get(
+    relevant_papers = state.get(
         "relevant_papers",
         []
     )
 
-    successful = []
+    if not relevant_papers:
+        return {
+            "paper_analysis": []
+        }
 
-    for paper in papers:
+    analyses = []
+
+    for paper in relevant_papers:
 
         title = paper.get(
             "title",
-            "Unknown"
+            ""
         )
 
-        pdf_url = paper.get(
-            "pdf_url"
+        url = paper.get(
+            "url",
+            ""
         )
 
-        if not pdf_url:
+        if not url:
             continue
 
         try:
 
-            store_paper(
-                title,
-                pdf_url
+            stored = store_paper(
+                title=title,
+                url=url
             )
 
-            successful.append(
-                paper
+            if not stored:
+                continue
+
+            result = search_paper(
+                title
             )
 
-        except Exception as e:
-
-            print(
-                f"Could not read "
-                f"{title}: {e}"
-            )
-
-    return {
-        "relevant_papers":
-            successful
-    }
-
-
-# =========================================================
-# PAPER ANALYSIS
-# =========================================================
-
-async def research_agent_node(state):
-
-    print(
-        "\nAnalyzing papers..."
-    )
-
-    papers = state.get(
-        "relevant_papers",
-        []
-    )
-
-    all_analysis = []
-
-    questions = {
-
-        "research_problem":
-            "What is the research problem, motivation, or research gap?",
-
-        "method":
-            "What methodology, model, algorithm, or approach is proposed?",
-
-        "limitations":
-            "What limitations, weaknesses, or challenges are mentioned?",
-
-        "future_work":
-            "What future work or improvements are suggested?"
-    }
-
-    for paper in papers:
-
-        title = paper.get(
-            "title",
-            "Unknown"
-        )
-
-        evidence = {}
-
-        for field, question in questions.items():
-
-            chunks = search_paper(
-                question,
-                title,
-                k=2
-            )
-
-            if chunks:
-
-                evidence[field] = (
-                    "\n".join(
-                        chunks[:2]
-                    )[:1000]
+            if result:
+                analyses.append(
+                    {
+                        "title": title,
+                        "content": result
+                    }
                 )
 
-            else:
-
-                evidence[field] = (
-                    "Not found."
-                )
-
-        evidence_text = ""
-
-        for field, text in evidence.items():
-
-            evidence_text += (
-                f"\n\n{field.upper()}:\n"
-                f"{str(text)[:1000]}"
-            )
-
-        prompt = f"""
-Analyze this research paper using ONLY
-the retrieved evidence.
-
-Do not use outside knowledge.
-
-Paper Title:
-
-{title}
-
-Retrieved evidence:
-
-{evidence_text}
-
-Return ONLY valid JSON.
-
-Format:
-
-{{
-    "research_problem": "brief answer",
-    "method": "brief answer",
-    "limitations": "brief answer",
-    "future_work": "brief answer"
-}}
-"""
-
-        try:
-
-            response = await analysis_llm.ainvoke(
-                prompt
-            )
-
-            analysis = parse_json(
-                response.content
-            )
-
-            if not isinstance(
-                analysis,
-                dict
-            ):
-
-                analysis = {}
-
-            analysis["paper"] = title
-
-            all_analysis.append(
-                analysis
-            )
-
-        except Exception as e:
-
-            all_analysis.append(
-                {
-                    "paper": title,
-                    "error": str(e)
-                }
-            )
+        except Exception:
+            continue
 
     return {
-        "paper_analysis":
-            all_analysis
+        "paper_analysis": analyses
     }
 
 
 # =========================================================
-# GAP ANALYZER
+# RESEARCH AGENT
 # =========================================================
 
-async def gap_analyzer_node(state):
+async def research_agent_node(
+    state: MyState
+):
 
-    print(
-        "\nGenerating research-gap analysis..."
-    )
-
-    topic = state.get(
-        "topic",
-        ""
-    )
+    groq = get_groq_model()
 
     analyses = state.get(
         "paper_analysis",
@@ -894,117 +334,174 @@ async def gap_analyzer_node(state):
     )
 
     if not analyses:
-
         return {
             "novelty_assessments": []
         }
 
-    summaries_text = ""
-
-    for idx, item in enumerate(
+    research_material = json.dumps(
         analyses,
-        start=1
-    ):
-
-        if "error" in item:
-            continue
-
-        summaries_text += f"""
-
-PAPER {idx}: {item.get("paper", "Unknown")}
-
-Research Problem:
-{str(item.get("research_problem", "N/A"))[:600]}
-
-Method:
-{str(item.get("method", "N/A"))[:600]}
-
-Limitations:
-{str(item.get("limitations", "N/A"))[:600]}
-
-Future Work:
-{str(item.get("future_work", "N/A"))[:600]}
-"""
+        ensure_ascii=False
+    )
 
     prompt = f"""
-You are an expert AI research advisor.
+You are a research analysis agent.
 
 Research topic:
+{state["topic"]}
 
-{topic}
+You have access to information extracted from
+existing research papers:
 
-Retrieved literature evidence:
+{research_material}
 
-{summaries_text}
+For each relevant paper, identify:
 
-Generate 2 to 3 candidate research topics
-based ONLY on gaps supported by the retrieved
-literature.
+1. Research problem
+2. Method used
+3. Main limitation
+4. Future work
+5. Possible research gap
 
-Do not claim definitive novelty.
+Do not invent information.
 
-Do not claim that no previous research exists.
-
-Do not invent papers, methods, results,
-or research gaps.
-
-Use cautious wording.
-
-Status MUST be exactly one of:
-
-"Potentially underexplored"
-
-"Partially addressed"
-
-"High overlap in literature"
-
-Return ONLY valid JSON.
-
-Format:
+Return ONLY valid JSON:
 
 {{
     "assessments": [
         {{
-            "topic_number": 1,
-            "topic_title": "Specific research topic",
-            "status": "Potentially underexplored",
-            "similarity_analysis": "Evidence-based comparison.",
-            "remaining_gap": "Evidence-based remaining gap.",
-            "evidence_papers": ["Paper title"]
+            "title": "paper title",
+            "research_problem": "...",
+            "method": "...",
+            "limitations": "...",
+            "future_work": "...",
+            "research_gap": "..."
         }}
     ]
 }}
 """
 
+    response = await groq.ainvoke(
+        prompt
+    )
+
+    content = response.content
+
     try:
 
-        response = await gap_llm.ainvoke(
-            prompt
-        )
+        content = re.sub(
+            r"```json|```",
+            "",
+            content
+        ).strip()
 
-        result = parse_json(
-            response.content
-        )
+        result = json.loads(content)
 
-        assessments = result.get(
+    except Exception:
+
+        result = {
+            "assessments": []
+        }
+
+    return {
+        "novelty_assessments": result.get(
             "assessments",
             []
         )
+    }
 
-        return {
-            "novelty_assessments":
-                assessments
-        }
 
-    except Exception as e:
+# =========================================================
+# GAP ANALYZER
+# =========================================================
 
-        print(
-            f"Gap analysis failed: {e}"
-        )
+async def gap_analyzer_node(
+    state: MyState
+):
 
+    groq = get_groq_model()
+
+    assessments = state.get(
+        "novelty_assessments",
+        []
+    )
+
+    if not assessments:
         return {
             "novelty_assessments": []
         }
+
+    material = json.dumps(
+        assessments,
+        ensure_ascii=False
+    )
+
+    prompt = f"""
+You are a research gap analysis assistant.
+
+Research topic:
+{state["topic"]}
+
+Existing paper analysis:
+
+{material}
+
+Analyze the existing research and identify meaningful
+research gaps.
+
+Focus on gaps that are supported by the provided papers.
+
+For each gap provide:
+
+- research gap
+- why it matters
+- possible research direction
+- why the direction is different from existing work
+
+Do not claim that something is novel with certainty.
+Use careful research language.
+
+Return ONLY valid JSON:
+
+{{
+    "assessments": [
+        {{
+            "research_gap": "...",
+            "why_it_matters": "...",
+            "research_direction": "...",
+            "difference_from_existing_work": "..."
+        }}
+    ]
+}}
+"""
+
+    response = await groq.ainvoke(
+        prompt
+    )
+
+    content = response.content
+
+    try:
+
+        content = re.sub(
+            r"```json|```",
+            "",
+            content
+        ).strip()
+
+        result = json.loads(content)
+
+    except Exception:
+
+        result = {
+            "assessments": assessments
+        }
+
+    return {
+        "novelty_assessments": result.get(
+            "assessments",
+            assessments
+        )
+    }
 
 
 # =========================================================
@@ -1014,6 +511,7 @@ Format:
 graph = StateGraph(
     MyState
 )
+
 
 graph.add_node(
     "openalex",
@@ -1044,6 +542,7 @@ graph.add_node(
     "gap_analyzer",
     gap_analyzer_node
 )
+
 
 graph.add_edge(
     START,
@@ -1080,9 +579,5 @@ graph.add_edge(
     END
 )
 
-
-# =========================================================
-# COMPILED RESEARCH GRAPH
-# =========================================================
 
 research_graph = graph.compile()
