@@ -1,5 +1,5 @@
 const API_URL =
-  "https://beyond-paper-ac0zabblg-smilingstar78s-projects.vercel.app";
+  "https://beyond-paper-inky.vercel.app";
 
 
 export async function fetchHealth(signal) {
