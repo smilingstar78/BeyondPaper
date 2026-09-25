@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,14 +27,22 @@ class ResearchRequest(BaseModel):
 
 @app.get("/")
 async def root():
+
+    groq_key = os.environ.get(
+        "GROQ_API_KEY"
+    )
+
     return {
         "status": "ok",
-        "message": "BeyondPaper API is running."
+        "message": "BeyondPaper API is running.",
+        "groq_key": bool(groq_key)
     }
 
 
 @app.post("/research")
-async def research(request: ResearchRequest):
+async def research(
+    request: ResearchRequest
+):
 
     topic = request.topic.strip()
 
