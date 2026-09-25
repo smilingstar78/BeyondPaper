@@ -1,7 +1,11 @@
-// Talks to the Python server (server.py).
+const API_URL = "https://beyond-paper-inky.vercel.app";
 
+
+// Check whether the backend is running.
 export async function fetchHealth(signal) {
-  const res = await fetch("/api/health", { signal });
+  const res = await fetch(`${API_URL}/`, {
+    signal
+  });
 
   if (!res.ok) {
     throw new Error(
@@ -12,44 +16,26 @@ export async function fetchHealth(signal) {
   return res.json();
 }
 
-/**
- * Sends one message and receives Server-Sent Events
- * from the Python backend.
- *
- * Backend events look like:
- *
- * event: step
- * data: {"id":"step-openalex","text":"Found 5 papers on OpenAlex..."}
- *
- * event: paper
- * data: {"id":"p-1","title":"..."}
- *
- * event: answer
- * data: {"text":"..."}
- *
- * event: done
- * data: {"status":"completed"}
- */
 
+// Send a research topic to the Python backend.
 export async function streamChat({
   message,
   threadId,
   onEvent,
   signal
 }) {
-  const res = await fetch("/api/chat", {
+  const res = await fetch(`${API_URL}/research`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      message,
-      thread_id: threadId
+      topic: message
     }),
     signal
   });
 
-  if (!res.ok || !res.body) {
+  if (!res.ok) {
     let detail = "";
 
     try {
@@ -58,6 +44,8 @@ export async function streamChat({
       detail =
         typeof body.detail === "string"
           ? body.detail
+          : typeof body.error === "string"
+          ? body.error
           : "";
     } catch {
       // Ignore invalid error response.
@@ -69,120 +57,18 @@ export async function streamChat({
     );
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
+  const data = await res.json();
 
-  let buffer = "";
+  // Tell the existing frontend that the research is complete.
+  onEvent({
+    type: "answer",
+    text: JSON.stringify(data.assessments, null, 2)
+  });
 
-  let eventType = null;
-  let eventData = "";
+  onEvent({
+    type: "done",
+    status: "completed"
+  });
 
-  function emitEvent() {
-    if (!eventData) {
-      eventType = null;
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(eventData);
-
-      onEvent({
-        type: eventType || parsed.type || "message",
-        ...parsed
-      });
-    } catch (error) {
-      console.warn(
-        "Could not parse SSE data:",
-        eventData,
-        error
-      );
-    }
-
-    eventType = null;
-    eventData = "";
-  }
-
-  for (;;) {
-    const { value, done } = await reader.read();
-
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, {
-      stream: true
-    });
-
-    let newline;
-
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const rawLine = buffer.slice(
-        0,
-        newline
-      );
-
-      buffer = buffer.slice(
-        newline + 1
-      );
-
-      const line = rawLine.trim();
-
-      // Empty line means the current SSE event is complete.
-      if (!line) {
-        emitEvent();
-        continue;
-      }
-
-      // Read event type.
-      if (line.startsWith("event:")) {
-        eventType = line
-          .slice(6)
-          .trim();
-
-        continue;
-      }
-
-      // Read event data.
-      if (line.startsWith("data:")) {
-        const data = line
-          .slice(5)
-          .trim();
-
-        eventData += data;
-
-        continue;
-      }
-    }
-  }
-
-  // Flush any remaining decoder content.
-  buffer += decoder.decode();
-
-  if (buffer.trim()) {
-    const lines = buffer.split("\n");
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-
-      if (!line) {
-        emitEvent();
-        continue;
-      }
-
-      if (line.startsWith("event:")) {
-        eventType = line
-          .slice(6)
-          .trim();
-      } else if (line.startsWith("data:")) {
-        const data = line
-          .slice(5)
-          .trim();
-
-        eventData += data;
-      }
-    }
-  }
-
-  // Emit the final event if necessary.
-  emitEvent();
+  return data;
 }
