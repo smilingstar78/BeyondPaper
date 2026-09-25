@@ -8,6 +8,4 @@ langchain-groq
 langgraph
 langchain-mcp-adapters
 mcp
-chromadb
-sentence-transformers
 pypdf
