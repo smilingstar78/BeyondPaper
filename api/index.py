@@ -28,14 +28,9 @@ class ResearchRequest(BaseModel):
 @app.get("/")
 async def root():
 
-    groq_key = os.environ.get(
-        "GROQ_API_KEY"
-    )
-
     return {
         "status": "ok",
-        "message": "BeyondPaper API is running.",
-        "groq_key": bool(groq_key)
+        "message": "BeyondPaper API is running."
     }
 
 
@@ -47,9 +42,11 @@ async def research(
     topic = request.topic.strip()
 
     if not topic:
+
         return {
             "error": "Research topic is required."
         }
+
 
     initial_state = {
         "topic": topic,
@@ -60,9 +57,11 @@ async def research(
         "novelty_assessments": []
     }
 
+
     final_state = await research_graph.ainvoke(
         initial_state
     )
+
 
     return {
         "topic": topic,
