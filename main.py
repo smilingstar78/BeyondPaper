@@ -16,8 +16,22 @@ from tools import search_openalex, search_arxiv
 # =========================================================
 # GROQ MODEL
 # =========================================================
+#
+# FIX: this used to hit the Groq /models endpoint on every single
+# node call (4x per graph run). The selected model is now cached
+# after the first successful lookup, so the network check only
+# happens once per process.
+# =========================================================
+
+_cached_groq_model = None
+
 
 def get_groq_model():
+    global _cached_groq_model
+
+    if _cached_groq_model is not None:
+        return _cached_groq_model
+
     api_key = os.environ.get("GROQ_API_KEY")
 
     print(
@@ -81,11 +95,13 @@ def get_groq_model():
         selected_model
     )
 
-    return ChatGroq(
+    _cached_groq_model = ChatGroq(
         model=selected_model,
         api_key=api_key,
         temperature=0
     )
+
+    return _cached_groq_model
 
 
 # =========================================================
@@ -368,9 +384,11 @@ async def paper_reader_node(
 
         try:
 
+            # FIX (bug #1): keyword must be pdf_url, not url,
+            # to match paper_reader.store_paper's signature.
             stored = store_paper(
                 title=title,
-                url=url
+                pdf_url=url
             )
 
             print(
@@ -378,12 +396,21 @@ async def paper_reader_node(
                 stored
             )
 
+            # FIX (bug #2): store_paper now returns True/False
+            # instead of always returning None, so this check
+            # actually reflects success/failure.
             if not stored:
                 print(
                     "Paper could not be stored."
                 )
                 continue
 
+            # FIX (bug #3/#4): search_paper's signature is now
+            # search_paper(title, questions=None, k=2). Calling it
+            # with just the title runs a default set of targeted
+            # queries (problem/method/limitations/future work)
+            # against that paper's stored chunks, instead of using
+            # the title itself as a similarity-search query.
             result = search_paper(
                 title
             )
