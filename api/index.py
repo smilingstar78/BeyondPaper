@@ -42,11 +42,9 @@ async def research(
     topic = request.topic.strip()
 
     if not topic:
-
         return {
             "error": "Research topic is required."
         }
-
 
     initial_state = {
         "topic": topic,
@@ -57,11 +55,9 @@ async def research(
         "novelty_assessments": []
     }
 
-
     final_state = await research_graph.ainvoke(
         initial_state
     )
-
 
     return {
         "topic": topic,
