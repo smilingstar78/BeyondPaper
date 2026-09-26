@@ -6,19 +6,32 @@ import requests
 from typing import TypedDict
 
 from langchain_groq import ChatGroq
-from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from langgraph.graph import StateGraph, START, END
 
 from paper_reader import store_paper, search_paper
 
+from tools import search_openalex, search_arxiv
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# =========================================================
+# BASE DIRECTORY
+# =========================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+
+# =========================================================
+# GROQ MODEL
+# =========================================================
 
 def get_groq_model():
 
-    api_key = os.environ.get("GROQ_API_KEY")
+    api_key = os.environ.get(
+        "GROQ_API_KEY"
+    )
 
     print(
         "GROQ_API_KEY exists:",
@@ -26,16 +39,20 @@ def get_groq_model():
     )
 
     if not api_key:
+
         raise RuntimeError(
             "GROQ_API_KEY is not available in the Vercel runtime."
         )
 
     try:
+
         response = requests.get(
             "https://api.groq.com/openai/v1/models",
+
             headers={
                 "Authorization": f"Bearer {api_key}"
             },
+
             timeout=10
         )
 
@@ -60,47 +77,51 @@ def get_groq_model():
 
         available_models = set()
 
+
     preferred_models = [
+
         "llama-3.1-8b-instant",
+
         "llama-3.3-70b-versatile",
+
         "openai/gpt-oss-120b",
+
         "openai/gpt-oss-20b"
     ]
 
+
     selected_model = None
+
 
     for model in preferred_models:
 
         if model in available_models:
+
             selected_model = model
+
             break
 
+
     if selected_model is None:
-        selected_model = "llama-3.1-8b-instant"
+
+        selected_model = (
+            "llama-3.1-8b-instant"
+        )
+
 
     return ChatGroq(
+
         model=selected_model,
+
         api_key=api_key,
+
         temperature=0
     )
 
 
-TOOLS_PATH = os.path.join(
-    BASE_DIR,
-    "tools.py"
-)
-
-
-client = MultiServerMCPClient(
-    {
-        "research_agent": {
-            "transport": "stdio",
-            "command": "python",
-            "args": [TOOLS_PATH]
-        }
-    }
-)
-
+# =========================================================
+# STATE
+# =========================================================
 
 class MyState(TypedDict):
 
@@ -117,53 +138,57 @@ class MyState(TypedDict):
     novelty_assessments: list
 
 
-async def openalex_node(state: MyState):
+# =========================================================
+# OPENALEX NODE
+# =========================================================
 
-    tools = await client.get_tools()
+async def openalex_node(
+    state: MyState
+):
 
-    search_openalex = next(
-        tool
-        for tool in tools
-        if tool.name == "search_openalex"
-    )
-
-    papers = await search_openalex.ainvoke(
-        {
-            "topic": state["topic"]
-        }
+    papers = search_openalex(
+        state["topic"]
     )
 
     if not papers:
+
         papers = []
 
+
     return {
+
         "open_alex": papers
+
     }
 
 
-async def arxiv_node(state: MyState):
+# =========================================================
+# ARXIV NODE
+# =========================================================
 
-    tools = await client.get_tools()
+async def arxiv_node(
+    state: MyState
+):
 
-    search_arxiv = next(
-        tool
-        for tool in tools
-        if tool.name == "search_arxiv"
-    )
-
-    papers = await search_arxiv.ainvoke(
-        {
-            "topic": state["topic"]
-        }
+    papers = search_arxiv(
+        state["topic"]
     )
 
     if not papers:
+
         papers = []
 
+
     return {
+
         "arxiv_papers": papers
+
     }
 
+
+# =========================================================
+# FIND RELEVANT PAPERS
+# =========================================================
 
 async def relevant_paper_finder(
     state: MyState
@@ -171,34 +196,58 @@ async def relevant_paper_finder(
 
     groq = get_groq_model()
 
+
     papers = (
-        state.get("open_alex", [])
+
+        state.get(
+            "open_alex",
+            []
+        )
+
         +
-        state.get("arxiv_papers", [])
+
+        state.get(
+            "arxiv_papers",
+            []
+        )
+
     )
+
 
     if not papers:
 
         return {
+
             "relevant_papers": []
+
         }
 
+
     paper_text = json.dumps(
+
         papers,
+
         ensure_ascii=False
+
     )
 
+
     prompt = f"""
+
 You are a research paper selection assistant.
 
 Research topic:
+
 {state["topic"]}
+
 
 Below are papers retrieved from OpenAlex and arXiv:
 
 {paper_text}
 
+
 Select the papers that are genuinely relevant to the research topic.
+
 
 Return ONLY valid JSON in this format:
 
@@ -212,102 +261,167 @@ Return ONLY valid JSON in this format:
     ]
 }}
 
+
 Select at most 5 papers.
+
 """
+
 
     response = await groq.ainvoke(
         prompt
     )
 
+
     content = response.content
+
 
     try:
 
         content = re.sub(
+
             r"```json|```",
+
             "",
+
             content
+
         ).strip()
 
-        result = json.loads(content)
+
+        result = json.loads(
+            content
+        )
+
 
     except Exception:
 
         result = {
+
             "relevant_papers": []
+
         }
 
+
     return {
+
         "relevant_papers": result.get(
+
             "relevant_papers",
+
             []
+
         )
+
     }
 
+
+# =========================================================
+# PAPER READER
+# =========================================================
 
 async def paper_reader_node(
     state: MyState
 ):
 
     relevant_papers = state.get(
+
         "relevant_papers",
+
         []
+
     )
+
 
     if not relevant_papers:
 
         return {
+
             "paper_analysis": []
+
         }
 
+
     analyses = []
+
 
     for paper in relevant_papers:
 
         title = paper.get(
+
             "title",
+
             ""
+
         )
+
 
         url = paper.get(
+
             "url",
+
             ""
+
         )
 
+
         if not url:
+
             continue
+
 
         try:
 
             stored = store_paper(
+
                 title=title,
+
                 url=url
+
             )
+
 
             if not stored:
+
                 continue
 
+
             result = search_paper(
+
                 title
+
             )
+
 
             if result:
 
                 analyses.append(
+
                     {
+
                         "title": title,
+
                         "content": result
+
                     }
+
                 )
+
 
         except Exception:
 
             continue
 
+
     return {
+
         "paper_analysis": analyses
+
     }
 
+
+# =========================================================
+# RESEARCH AGENT
+# =========================================================
 
 async def research_agent_node(
     state: MyState
@@ -315,32 +429,48 @@ async def research_agent_node(
 
     groq = get_groq_model()
 
+
     analyses = state.get(
+
         "paper_analysis",
+
         []
+
     )
+
 
     if not analyses:
 
         return {
+
             "novelty_assessments": []
+
         }
 
+
     research_material = json.dumps(
+
         analyses,
+
         ensure_ascii=False
+
     )
 
+
     prompt = f"""
+
 You are a research analysis agent.
 
 Research topic:
+
 {state["topic"]}
+
 
 You have access to information extracted from
 existing research papers:
 
 {research_material}
+
 
 For each relevant paper, identify:
 
@@ -350,7 +480,9 @@ For each relevant paper, identify:
 4. Future work
 5. Possible research gap
 
+
 Do not invent information.
+
 
 Return ONLY valid JSON:
 
@@ -366,37 +498,61 @@ Return ONLY valid JSON:
         }}
     ]
 }}
+
 """
+
 
     response = await groq.ainvoke(
         prompt
     )
 
+
     content = response.content
+
 
     try:
 
         content = re.sub(
+
             r"```json|```",
+
             "",
+
             content
+
         ).strip()
 
-        result = json.loads(content)
+
+        result = json.loads(
+            content
+        )
+
 
     except Exception:
 
         result = {
+
             "assessments": []
+
         }
 
+
     return {
+
         "novelty_assessments": result.get(
+
             "assessments",
+
             []
+
         )
+
     }
 
+
+# =========================================================
+# GAP ANALYZER
+# =========================================================
 
 async def gap_analyzer_node(
     state: MyState
@@ -404,36 +560,54 @@ async def gap_analyzer_node(
 
     groq = get_groq_model()
 
+
     assessments = state.get(
+
         "novelty_assessments",
+
         []
+
     )
+
 
     if not assessments:
 
         return {
+
             "novelty_assessments": []
+
         }
 
+
     material = json.dumps(
+
         assessments,
+
         ensure_ascii=False
+
     )
 
+
     prompt = f"""
+
 You are a research gap analysis assistant.
 
 Research topic:
+
 {state["topic"]}
+
 
 Existing paper analysis:
 
 {material}
 
+
 Analyze the existing research and identify meaningful
 research gaps.
 
+
 Focus on gaps that are supported by the provided papers.
+
 
 For each gap provide:
 
@@ -442,8 +616,10 @@ For each gap provide:
 - possible research direction
 - why the direction is different from existing work
 
+
 Do not claim that something is novel with certainty.
 Use careful research language.
+
 
 Return ONLY valid JSON:
 
@@ -457,37 +633,61 @@ Return ONLY valid JSON:
         }}
     ]
 }}
+
 """
+
 
     response = await groq.ainvoke(
         prompt
     )
 
+
     content = response.content
+
 
     try:
 
         content = re.sub(
+
             r"```json|```",
+
             "",
+
             content
+
         ).strip()
 
-        result = json.loads(content)
+
+        result = json.loads(
+            content
+        )
+
 
     except Exception:
 
         result = {
+
             "assessments": assessments
+
         }
 
+
     return {
+
         "novelty_assessments": result.get(
+
             "assessments",
+
             assessments
+
         )
+
     }
 
+
+# =========================================================
+# LANGGRAPH
+# =========================================================
 
 graph = StateGraph(
     MyState
@@ -499,25 +699,30 @@ graph.add_node(
     openalex_node
 )
 
+
 graph.add_node(
     "arxiv",
     arxiv_node
 )
+
 
 graph.add_node(
     "relevant_paper_finder",
     relevant_paper_finder
 )
 
+
 graph.add_node(
     "paper_reader",
     paper_reader_node
 )
 
+
 graph.add_node(
     "research_agent",
     research_agent_node
 )
+
 
 graph.add_node(
     "gap_analyzer",
@@ -525,40 +730,54 @@ graph.add_node(
 )
 
 
+# =========================================================
+# EDGES
+# =========================================================
+
 graph.add_edge(
     START,
     "openalex"
 )
+
 
 graph.add_edge(
     "openalex",
     "arxiv"
 )
 
+
 graph.add_edge(
     "arxiv",
     "relevant_paper_finder"
 )
+
 
 graph.add_edge(
     "relevant_paper_finder",
     "paper_reader"
 )
 
+
 graph.add_edge(
     "paper_reader",
     "research_agent"
 )
+
 
 graph.add_edge(
     "research_agent",
     "gap_analyzer"
 )
 
+
 graph.add_edge(
     "gap_analyzer",
     END
 )
 
+
+# =========================================================
+# COMPILE
+# =========================================================
 
 research_graph = graph.compile()
