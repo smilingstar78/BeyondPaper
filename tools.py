@@ -2,17 +2,6 @@ import requests
 import re
 import xml.etree.ElementTree as ET
 
-from mcp.server.fastmcp import FastMCP
-
-
-# =========================================================
-# MCP SERVER
-# =========================================================
-
-mcp = FastMCP(
-    "Research Tools"
-)
-
 
 # =========================================================
 # ARXIV XML NAMESPACE
@@ -25,7 +14,6 @@ ATOM_NS = "{http://www.w3.org/2005/Atom}"
 # OPENALEX
 # =========================================================
 
-@mcp.tool()
 def search_openalex(topic: str) -> list:
 
     """Search OpenAlex for research papers."""
@@ -110,7 +98,6 @@ def search_openalex(topic: str) -> list:
                 )
 
                 if pdf_url:
-
                     break
 
         papers.append(
@@ -144,7 +131,6 @@ def search_openalex(topic: str) -> list:
 # ARXIV
 # =========================================================
 
-@mcp.tool()
 def search_arxiv(topic: str) -> list:
 
     """Search arXiv for research papers."""
@@ -296,7 +282,6 @@ def search_arxiv(topic: str) -> list:
             ):
 
                 pdf_url = href
-
                 break
 
         # -------------------------------------------------
@@ -330,14 +315,3 @@ def search_arxiv(topic: str) -> list:
         )
 
     return papers
-
-
-# =========================================================
-# START MCP SERVER
-# =========================================================
-
-if __name__ == "__main__":
-
-    mcp.run(
-        transport="stdio"
-    )
