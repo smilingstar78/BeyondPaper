@@ -1,129 +1,104 @@
 const API_URL =
-import.meta.env.VITE_API_BASE_URL ||
-"https://beyond-paper-inky.vercel.app";
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://beyond-paper-inky.vercel.app";
+
 
 export async function fetchHealth(signal) {
-const res = await fetch(
-`${API_URL}/api/health`,
-{
-signal
-}
-);
 
-if (!res.ok) {
-throw new Error(
-`Health check failed with status ${res.status}`
-);
+  const res = await fetch(
+    `${API_URL}/`,
+    {
+      signal
+    }
+  );
+
+
+  if (!res.ok) {
+
+    throw new Error(
+      `Health check failed with status ${res.status}`
+    );
+
+  }
+
+
+  return res.json();
 }
 
-return res.json();
-}
 
 export async function streamChat({
-message,
-threadId,
-onEvent,
-signal
-}) {
-const res = await fetch(
-`${API_URL}/api/chat`,
-{
-method: "POST",
-  headers: {
-    "Content-Type": "application/json"
-  },
-
-  body: JSON.stringify({
-    message
-  }),
-
+  message,
+  threadId,
+  onEvent,
   signal
-}
+}) {
 
-);
+  const res = await fetch(
+    `${API_URL}/research`,
+    {
+      method: "POST",
 
-if (!res.ok) {
-let detail = "";
+      headers: {
+        "Content-Type": "application/json"
+      },
 
-try {
-  const body = await res.json();
+      body: JSON.stringify({
+        topic: message
+      }),
 
-  detail =
-    typeof body.detail === "string"
-      ? body.detail
-      : typeof body.error === "string"
-      ? body.error
-      : "";
-} catch {
-  // Ignore invalid error response.
-}
+      signal
+    }
+  );
 
-throw new Error(
-  detail ||
-  `The server answered with status ${res.status}.`
-);
 
-}
+  if (!res.ok) {
 
-const reader = res.body.getReader();
-const decoder = new TextDecoder();
+    let detail = "";
 
-let buffer = "";
+    try {
 
-while (true) {
-const { value, done } = await reader.read();
+      const body =
+        await res.json();
 
-if (done) {
-  break;
-}
+      detail =
+        typeof body.detail === "string"
+          ? body.detail
+          : typeof body.error === "string"
+          ? body.error
+          : "";
 
-buffer += decoder.decode(value, {
-  stream: true
-});
-
-const events = buffer.split("\n\n");
-
-buffer = events.pop() || "";
-
-for (const eventBlock of events) {
-  const lines = eventBlock.split("\n");
-
-  let eventType = "message";
-  let eventData = "";
-
-  for (const line of lines) {
-    if (line.startsWith("event:")) {
-      eventType = line
-        .slice(6)
-        .trim();
+    } catch {
+      // Ignore invalid error response.
     }
 
-    if (line.startsWith("data:")) {
-      eventData += line
-        .slice(5)
-        .trim();
-    }
+
+    throw new Error(
+      detail ||
+      `The server answered with status ${res.status}.`
+    );
+
   }
 
-  if (!eventData) {
-    continue;
-  }
 
-  let parsedData = eventData;
+  const data =
+    await res.json();
 
-  try {
-    parsedData = JSON.parse(eventData);
-  } catch {
-    // Keep plain text if it isn't JSON.
-  }
 
   onEvent({
-    type: eventType,
-    ...(typeof parsedData === "object" && parsedData !== null
-      ? parsedData
-      : { text: parsedData })
+    type: "answer",
+    text: JSON.stringify(
+      data.assessments,
+      null,
+      2
+    )
   });
-}
 
-}
+
+  onEvent({
+    type: "done",
+    status: "completed"
+  });
+
+
+  return data;
 }
