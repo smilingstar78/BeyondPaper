@@ -8,6 +8,7 @@ export async function fetchHealth(signal) {
   const res = await fetch(
     `${API_URL}/`,
     {
+      method: "GET",
       signal
     }
   );
@@ -87,7 +88,7 @@ export async function streamChat({
   onEvent({
     type: "answer",
     text: JSON.stringify(
-      data.assessments,
+      data.assessments || [],
       null,
       2
     )
