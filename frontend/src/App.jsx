@@ -463,28 +463,6 @@ export default function App() {
             </div>
           ) : null}
 
-
-          {online &&
-          health.info &&
-          !health.info.groq_key ? (
-            <div
-              className="notice notice--wide"
-              role="alert"
-            >
-              <p>
-                The server has no{" "}
-                <code>
-                  GROQ_API_KEY
-                </code>
-                . Add it to the{" "}
-                <code>.env</code>{" "}
-                file, then restart
-                the server.
-              </p>
-            </div>
-          ) : null}
-
-
           {showEmpty ? (
             <Empty
               onPick={send}
