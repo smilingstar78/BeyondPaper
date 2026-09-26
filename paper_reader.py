@@ -271,12 +271,22 @@ def chunk_text(pages):
 # =========================================================
 # STORE PAPER
 # =========================================================
+#
+# FIX (bug #1 / #2): parameter renamed to match how main.py calls it
+# (title=..., pdf_url=...), and the function now explicitly returns
+# True/False so callers can reliably check success instead of always
+# getting None (which was being treated as "storage failed" every time).
+# =========================================================
 
 def store_paper(title, pdf_url):
 
     print(f"\nReading: {title}")
 
-    pages = read_pdf(pdf_url)
+    try:
+        pages = read_pdf(pdf_url)
+    except Exception as e:
+        print(f"Failed to read PDF for '{title}': {e}")
+        return False
 
     total_characters = sum(
         len(page["text"])
@@ -295,10 +305,8 @@ def store_paper(title, pdf_url):
     )
 
     if not chunks:
-
-        raise ValueError(
-            "No chunks were created."
-        )
+        print(f"No chunks created for '{title}'.")
+        return False
 
     paper_id = hashlib.md5(
         pdf_url.encode()
@@ -318,101 +326,132 @@ def store_paper(title, pdf_url):
         "Creating Gemini embeddings..."
     )
 
-    vectors = create_document_embeddings(
-        documents,
-        title
-    )
+    try:
+        vectors = create_document_embeddings(
+            documents,
+            title
+        )
+    except Exception as e:
+        print(f"Embedding creation failed for '{title}': {e}")
+        return False
 
-    collection.upsert(
-        ids=ids,
-        documents=documents,
-        embeddings=vectors,
-        metadatas=[
-            {
-                "title": title,
-                "pdf_url": pdf_url,
-                "page": chunk["page"],
-                "chunk_index": i
-            }
-            for i, chunk in enumerate(chunks)
-        ]
-    )
+    try:
+        collection.upsert(
+            ids=ids,
+            documents=documents,
+            embeddings=vectors,
+            metadatas=[
+                {
+                    "title": title,
+                    "pdf_url": pdf_url,
+                    "page": chunk["page"],
+                    "chunk_index": i
+                }
+                for i, chunk in enumerate(chunks)
+            ]
+        )
+    except Exception as e:
+        print(f"Chroma upsert failed for '{title}': {e}")
+        return False
 
     print(
         f"Stored {len(chunks)} chunks."
     )
 
+    return True
+
 
 # =========================================================
 # SEARCH PAPER
 # =========================================================
+#
+# FIX (bug #3 / #4): main.py was calling search_paper(title) with a
+# single positional arg, but the function required (question, title).
+# It was also using the paper title itself as the similarity-search
+# query, which doesn't retrieve content relevant to research problem/
+# method/limitations/etc.
+#
+# This version keeps title as the only required argument (matching how
+# main.py calls it) and internally runs several targeted queries
+# (research problem, method, limitations, future work) against that
+# paper's chunks, merging and de-duplicating the results. If no
+# questions are supplied it falls back to pulling the paper's stored
+# chunks directly (no embedding search needed).
+# =========================================================
 
-def search_paper(
-    question,
-    title,
-    k=2
-):
+DEFAULT_QUERIES = [
+    "research problem and objective",
+    "method or approach used",
+    "limitations and weaknesses",
+    "future work and open questions",
+]
+
+
+def _query_chunks(question, title, k):
 
     try:
-
-        query_embedding = (
-            create_query_embedding(
-                question
-            )
-        )
+        query_embedding = create_query_embedding(question)
 
         results = collection.query(
-            query_embeddings=[
-                query_embedding
-            ],
+            query_embeddings=[query_embedding],
             n_results=k,
-            where={
-                "title": title
-            }
+            where={"title": title}
         )
 
     except Exception as e:
-
-        print(
-            f"Chroma search error: {e}"
-        )
-
+        print(f"Chroma search error for query '{question}': {e}")
         return []
 
-    documents = results.get(
-        "documents"
-    )
+    documents = results.get("documents")
+    metadatas = results.get("metadatas")
 
-    metadatas = results.get(
-        "metadatas"
-    )
-
-    if not documents:
-
+    if not documents or not documents[0]:
         return []
 
     documents = documents[0]
+    metadatas = metadatas[0] if metadatas else [{} for _ in documents]
 
-    metadatas = (
-        metadatas[0]
-        if metadatas
-        else [{} for _ in documents]
-    )
+    chunks = []
 
+    for document, metadata in zip(documents, metadatas):
+        page = metadata.get("page", "unknown")
+        chunks.append((page, document))
+
+    return chunks
+
+
+def search_paper(title, questions=None, k=2):
+    """
+    Retrieve representative chunks for a stored paper.
+
+    `title` is required and is used to filter to that paper's chunks.
+    `questions`, if provided, is a list of search prompts; if omitted,
+    a default set covering problem/method/limitations/future work is
+    used. Results are de-duplicated and returned as a list of
+    formatted "[Page N]\\n<text>" strings, ready to feed to an LLM.
+    """
+
+    queries = questions or DEFAULT_QUERIES
+
+    seen = set()
     retrieved_chunks = []
 
-    for document, metadata in zip(
-        documents,
-        metadatas
-    ):
+    for question in queries:
 
-        page = metadata.get(
-            "page",
-            "unknown"
-        )
+        for page, document in _query_chunks(question, title, k):
 
-        retrieved_chunks.append(
-            f"[Page {page}]\n{document}"
-        )
+            key = (page, document)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            retrieved_chunks.append(
+                f"[Page {page}]\n{document}"
+            )
+
+    if not retrieved_chunks:
+        print(f"No chunks retrieved for '{title}'.")
 
     return retrieved_chunks
