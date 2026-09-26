@@ -32,18 +32,23 @@ const FOLLOW_UPS = [
 
 
 function explain(error) {
+
   const message =
     error && error.message
       ? error.message
       : "";
+
 
   if (
     /failed to fetch|networkerror|load failed/i.test(
       message
     )
   ) {
-    return "The app lost its connection to the agent. Check that python server.py is still running, then try again.";
+
+    return "The app could not connect to the research API. Please try again.";
+
   }
+
 
   return (
     message ||
@@ -53,6 +58,7 @@ function explain(error) {
 
 
 export default function App() {
+
   const [
     state,
     dispatch
@@ -62,10 +68,12 @@ export default function App() {
     initState
   );
 
+
   const [health, setHealth] =
     useState({
       status: "checking"
     });
+
 
   const [folded, setFolded] =
     useState(
@@ -75,197 +83,257 @@ export default function App() {
         window.innerHeight < 680
     );
 
+
   const [hotId, setHotId] =
     useState(null);
+
 
   const [openId, setOpenId] =
     useState(null);
 
+
   const [draft, setDraft] =
     useState("");
 
-  const deskRef = useRef(null);
 
-  const stick = useRef(true);
+  const deskRef =
+    useRef(null);
+
+
+  const stick =
+    useRef(true);
+
 
   const busyRef =
     useRef(false);
 
+
   const threadRef =
     useRef(state.threadId);
 
+
   threadRef.current =
     state.threadId;
+
 
   const online =
     health.status === "online";
 
 
-  // Keep the session in the browser.
   useEffect(() => {
+
     saveSession(state);
+
   }, [state]);
 
 
-  // Check whether the Python backend is running.
   useEffect(() => {
+
     let cancelled = false;
+
     let timer;
 
+
     const check = async () => {
+
       try {
+
         const info =
           await fetchHealth();
+
 
         if (cancelled) {
           return;
         }
+
 
         setHealth({
           status: "online",
           info
         });
 
+
         dispatch({
           type: "boot",
-          bootId: info.boot_id
+          bootId:
+            info.boot_id ||
+            null
         });
 
+
       } catch {
+
         if (cancelled) {
           return;
         }
+
 
         setHealth({
           status: "offline"
         });
 
-        timer = setTimeout(
-          check,
-          4000
-        );
+
+        timer =
+          setTimeout(
+            check,
+            4000
+          );
+
       }
+
     };
+
 
     check();
 
+
     return () => {
+
       cancelled = true;
+
       clearTimeout(timer);
+
     };
+
   }, []);
 
 
-  // Send a question to the research agent.
-  const send = useCallback(
-    async (text) => {
-      const question =
-        String(text || "").trim();
+  const send =
+    useCallback(
+      async (text) => {
 
-      if (
-        !question ||
-        busyRef.current
-      ) {
-        return;
-      }
+        const question =
+          String(text || "").trim();
 
-      busyRef.current = true;
 
-      stick.current = true;
+        if (
+          !question ||
+          busyRef.current
+        ) {
+          return;
+        }
 
-      setDraft("");
 
-      setOpenId(null);
+        busyRef.current = true;
 
-      const exId = uid("x");
+        stick.current = true;
 
-      dispatch({
-        type: "ask",
-        id: exId,
-        question
-      });
+        setDraft("");
 
-      try {
-        await streamChat({
-          message: question,
-          threadId:
-            threadRef.current,
+        setOpenId(null);
 
-          /*
-           * Every SSE event from Python
-           * comes through here.
-           *
-           * For example:
-           *
-           * {
-           *   type: "step",
-           *   text: "Found 5 papers on OpenAlex..."
-           * }
-           */
-          onEvent: (event) =>
-            dispatch({
-              type: "event",
-              exId,
-              event
-            })
+
+        const exId =
+          uid("x");
+
+
+        dispatch({
+          type: "ask",
+          id: exId,
+          question
         });
 
-      } catch (error) {
-        dispatch({
-          type: "event",
-          exId,
-          event: {
-            type: "error",
+
+        try {
+
+          await streamChat({
+
             message:
-              explain(error)
-          }
-        });
+              question,
 
-      } finally {
+            threadId:
+              threadRef.current,
+
+            onEvent:
+              (event) =>
+                dispatch({
+                  type: "event",
+                  exId,
+                  event
+                })
+
+          });
+
+
+        } catch (error) {
+
+          dispatch({
+            type: "event",
+
+            exId,
+
+            event: {
+              type: "error",
+
+              message:
+                explain(error)
+            }
+          });
+
+
+        } finally {
+
+          dispatch({
+            type: "event",
+
+            exId,
+
+            event: {
+              type: "done"
+            }
+          });
+
+
+          busyRef.current =
+            false;
+
+        }
+
+      },
+      []
+    );
+
+
+  const retry =
+    useCallback(
+      (ex) => {
+
         dispatch({
-          type: "event",
-          exId,
-          event: {
-            type: "done"
-          }
+          type: "drop",
+          id: ex.id
         });
 
-        busyRef.current = false;
-      }
-    },
-    []
-  );
+
+        send(
+          ex.question
+        );
+
+      },
+      [send]
+    );
 
 
-  const retry = useCallback(
-    (ex) => {
-      dispatch({
-        type: "drop",
-        id: ex.id
-      });
+  const askAbout =
+    useCallback(
+      (paper) => {
 
-      send(ex.question);
-    },
-    [send]
-  );
+        send(
+          `Tell me about “${paper.title}”: what it does, what it found, and what it leaves open.`
+        );
 
-
-  const askAbout = useCallback(
-    (paper) => {
-      send(
-        `Tell me about “${paper.title}”: what it does, what it found, and what it leaves open.`
-      );
-    },
-    [send]
-  );
+      },
+      [send]
+    );
 
 
   const newTopic = () => {
+
     if (
       window.confirm(
         "Start a new topic? This clears the conversation and the shelf."
       )
     ) {
+
       setOpenId(null);
 
       setHotId(null);
@@ -273,48 +341,60 @@ export default function App() {
       dispatch({
         type: "reset"
       });
+
     }
+
   };
 
 
   const openFromText =
     useCallback(
       (id) => {
+
         if (folded) {
+
           setFolded(false);
 
           setTimeout(
-            () => setOpenId(id),
+            () =>
+              setOpenId(id),
             420
           );
+
         } else {
+
           setOpenId(id);
+
         }
+
       },
       [folded]
     );
 
 
-  // Current exchange.
   const last =
     state.exchanges[
       state.exchanges.length - 1
     ];
+
 
   const lastId =
     last
       ? last.id
       : null;
 
+
   const lastStatus =
     last
       ? last.status
       : null;
 
+
   const lastFresh =
     last
       ? last.fresh
       : false;
+
 
   const stepCount =
     last
@@ -322,21 +402,28 @@ export default function App() {
       : 0;
 
 
-  // Follow the agent while it is working.
   useEffect(() => {
+
     const desk =
       deskRef.current;
+
 
     if (
       desk &&
       lastStatus === "working" &&
       stick.current
     ) {
+
       desk.scrollTo({
-        top: desk.scrollHeight,
-        behavior: "smooth"
+        top:
+          desk.scrollHeight,
+
+        behavior:
+          "smooth"
       });
+
     }
+
   }, [
     lastId,
     lastStatus,
@@ -344,26 +431,35 @@ export default function App() {
   ]);
 
 
-  // Scroll to the answer when finished.
   useEffect(() => {
+
     if (
       !state.busy &&
       lastStatus === "done" &&
       lastFresh &&
       lastId
     ) {
+
       const el =
         document.getElementById(
           `answer-${lastId}`
         );
 
+
       if (el) {
+
         el.scrollIntoView({
-          behavior: "smooth",
-          block: "start"
+          behavior:
+            "smooth",
+
+          block:
+            "start"
         });
+
       }
+
     }
+
   }, [
     state.busy,
     lastId,
@@ -373,16 +469,21 @@ export default function App() {
 
 
   const onDeskScroll = () => {
+
     const desk =
       deskRef.current;
 
+
     if (desk) {
+
       stick.current =
         desk.scrollHeight -
           desk.scrollTop -
           desk.clientHeight <
         140;
+
     }
+
   };
 
 
@@ -391,24 +492,40 @@ export default function App() {
 
 
   return (
+
     <div className="app">
 
       <Shelf
-        papers={state.papers}
-        busy={state.busy}
-        folded={folded}
+
+        papers={
+          state.papers
+        }
+
+        busy={
+          state.busy
+        }
+
+        folded={
+          folded
+        }
 
         onToggleFold={() => {
+
           setOpenId(null);
 
           setFolded(
             (f) => !f
           );
+
         }}
 
-        online={online}
+        online={
+          online
+        }
 
-        onNewTopic={newTopic}
+        onNewTopic={
+          newTopic
+        }
 
         canReset={
           !state.busy &&
@@ -420,106 +537,169 @@ export default function App() {
           )
         }
 
-        hotId={hotId}
-        openId={openId}
+        hotId={
+          hotId
+        }
 
-        onOpen={setOpenId}
+        openId={
+          openId
+        }
 
-        onAsk={askAbout}
+        onOpen={
+          setOpenId
+        }
+
+        onAsk={
+          askAbout
+        }
 
         canAsk={
           online &&
           !state.busy
         }
+
       />
 
 
       <main
+
         className="desk"
-        ref={deskRef}
-        onScroll={onDeskScroll}
+
+        ref={
+          deskRef
+        }
+
+        onScroll={
+          onDeskScroll
+        }
+
       >
 
         <div className="desk__inner">
 
           {health.status ===
           "offline" ? (
+
             <div
               className="notice notice--wide"
               role="alert"
             >
+
               <p>
-                The agent is not
-                reachable. Open a
-                terminal in the project
-                folder and run{" "}
-                <code>
-                  python server.py
-                </code>
-                . This page connects
-                on its own once the
-                server is up.
+                The research API
+                is currently
+                unreachable.
+                Please try again
+                in a moment.
               </p>
+
             </div>
+
           ) : null}
 
+
           {showEmpty ? (
+
             <Empty
-              onPick={send}
+
+              onPick={
+                send
+              }
+
               disabled={
                 !online ||
                 state.busy
               }
+
             />
+
           ) : (
+
             state.exchanges.map(
               (ex, i) => (
+
                 <Exchange
-                  key={ex.id}
-                  ex={ex}
+
+                  key={
+                    ex.id
+                  }
+
+                  ex={
+                    ex
+                  }
+
                   papers={
                     state.papers
                   }
+
                   isLast={
                     i ===
                     state.exchanges.length -
                       1
                   }
+
                   busy={
                     state.busy
                   }
+
                   onHot={
                     setHotId
                   }
+
                   onOpenPaper={
                     openFromText
                   }
+
                   onRetry={
                     retry
                   }
+
                   onAsk={
                     send
                   }
+
                   followUps={
                     FOLLOW_UPS
                   }
+
                 />
+
               )
             )
+
           )}
 
         </div>
+
       </main>
 
 
       <Composer
-        value={draft}
-        onChange={setDraft}
-        onSend={send}
-        busy={state.busy}
-        online={online}
+
+        value={
+          draft
+        }
+
+        onChange={
+          setDraft
+        }
+
+        onSend={
+          send
+        }
+
+        busy={
+          state.busy
+        }
+
+        online={
+          online
+        }
+
       />
 
     </div>
+
   );
+
 }
