@@ -1,5 +1,3 @@
-import os
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -42,27 +40,42 @@ async def research(
     topic = request.topic.strip()
 
     if not topic:
+
         return {
             "error": "Research topic is required."
         }
 
+
     initial_state = {
+
         "topic": topic,
+
         "arxiv_papers": [],
+
         "open_alex": [],
+
         "relevant_papers": [],
+
         "paper_analysis": [],
+
         "novelty_assessments": []
+
     }
+
 
     final_state = await research_graph.ainvoke(
         initial_state
     )
 
+
     return {
+
         "topic": topic,
-        "assessments": final_state.get(
-            "novelty_assessments",
-            []
-        )
+
+        "assessments":
+            final_state.get(
+                "novelty_assessments",
+                []
+            )
+
     }
