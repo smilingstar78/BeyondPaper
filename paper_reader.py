@@ -3,6 +3,11 @@ import hashlib
 import requests
 import chromadb
 
+from dotenv import load_dotenv
+
+# Load .env before reading GEMINI_API_KEY
+load_dotenv()
+
 from io import BytesIO
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -13,6 +18,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # =========================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+print("GEMINI_API_KEY exists:", bool(GEMINI_API_KEY))
 
 GEMINI_EMBEDDING_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
@@ -110,6 +117,10 @@ def create_document_embeddings(texts, title):
 
     return embeddings
 
+
+# =========================================================
+# GEMINI QUERY EMBEDDING
+# =========================================================
 
 def create_query_embedding(question):
 
@@ -271,21 +282,22 @@ def chunk_text(pages):
 # =========================================================
 # STORE PAPER
 # =========================================================
-#
-# FIX (bug #1 / #2): parameter renamed to match how main.py calls it
-# (title=..., pdf_url=...), and the function now explicitly returns
-# True/False so callers can reliably check success instead of always
-# getting None (which was being treated as "storage failed" every time).
-# =========================================================
 
 def store_paper(title, pdf_url):
 
     print(f"\nReading: {title}")
 
     try:
+
         pages = read_pdf(pdf_url)
+
     except Exception as e:
-        print(f"Failed to read PDF for '{title}': {e}")
+
+        print(
+            f"Failed to read PDF for "
+            f"'{title}': {e}"
+        )
+
         return False
 
     total_characters = sum(
@@ -305,7 +317,12 @@ def store_paper(title, pdf_url):
     )
 
     if not chunks:
-        print(f"No chunks created for '{title}'.")
+
+        print(
+            f"No chunks created for "
+            f"'{title}'."
+        )
+
         return False
 
     paper_id = hashlib.md5(
@@ -327,15 +344,23 @@ def store_paper(title, pdf_url):
     )
 
     try:
+
         vectors = create_document_embeddings(
             documents,
             title
         )
+
     except Exception as e:
-        print(f"Embedding creation failed for '{title}': {e}")
+
+        print(
+            f"Embedding creation failed "
+            f"for '{title}': {e}"
+        )
+
         return False
 
     try:
+
         collection.upsert(
             ids=ids,
             documents=documents,
@@ -350,8 +375,14 @@ def store_paper(title, pdf_url):
                 for i, chunk in enumerate(chunks)
             ]
         )
+
     except Exception as e:
-        print(f"Chroma upsert failed for '{title}': {e}")
+
+        print(
+            f"Chroma upsert failed "
+            f"for '{title}': {e}"
+        )
+
         return False
 
     print(
@@ -363,20 +394,6 @@ def store_paper(title, pdf_url):
 
 # =========================================================
 # SEARCH PAPER
-# =========================================================
-#
-# FIX (bug #3 / #4): main.py was calling search_paper(title) with a
-# single positional arg, but the function required (question, title).
-# It was also using the paper title itself as the similarity-search
-# query, which doesn't retrieve content relevant to research problem/
-# method/limitations/etc.
-#
-# This version keeps title as the only required argument (matching how
-# main.py calls it) and internally runs several targeted queries
-# (research problem, method, limitations, future work) against that
-# paper's chunks, merging and de-duplicating the results. If no
-# questions are supplied it falls back to pulling the paper's stored
-# chunks directly (no embedding search needed).
 # =========================================================
 
 DEFAULT_QUERIES = [
@@ -390,7 +407,10 @@ DEFAULT_QUERIES = [
 def _query_chunks(question, title, k):
 
     try:
-        query_embedding = create_query_embedding(question)
+
+        query_embedding = create_query_embedding(
+            question
+        )
 
         results = collection.query(
             query_embeddings=[query_embedding],
@@ -399,48 +419,71 @@ def _query_chunks(question, title, k):
         )
 
     except Exception as e:
-        print(f"Chroma search error for query '{question}': {e}")
+
+        print(
+            f"Chroma search error for query "
+            f"'{question}': {e}"
+        )
+
         return []
 
     documents = results.get("documents")
     metadatas = results.get("metadatas")
 
     if not documents or not documents[0]:
+
         return []
 
     documents = documents[0]
-    metadatas = metadatas[0] if metadatas else [{} for _ in documents]
+
+    metadatas = (
+        metadatas[0]
+        if metadatas
+        else [{} for _ in documents]
+    )
 
     chunks = []
 
-    for document, metadata in zip(documents, metadatas):
-        page = metadata.get("page", "unknown")
-        chunks.append((page, document))
+    for document, metadata in zip(
+        documents,
+        metadatas
+    ):
+
+        page = metadata.get(
+            "page",
+            "unknown"
+        )
+
+        chunks.append(
+            (page, document)
+        )
 
     return chunks
 
 
 def search_paper(title, questions=None, k=2):
-    """
-    Retrieve representative chunks for a stored paper.
 
-    `title` is required and is used to filter to that paper's chunks.
-    `questions`, if provided, is a list of search prompts; if omitted,
-    a default set covering problem/method/limitations/future work is
-    used. Results are de-duplicated and returned as a list of
-    formatted "[Page N]\\n<text>" strings, ready to feed to an LLM.
-    """
-
-    queries = questions or DEFAULT_QUERIES
+    queries = (
+        questions
+        or DEFAULT_QUERIES
+    )
 
     seen = set()
+
     retrieved_chunks = []
 
     for question in queries:
 
-        for page, document in _query_chunks(question, title, k):
+        for page, document in _query_chunks(
+            question,
+            title,
+            k
+        ):
 
-            key = (page, document)
+            key = (
+                page,
+                document
+            )
 
             if key in seen:
                 continue
@@ -452,6 +495,10 @@ def search_paper(title, questions=None, k=2):
             )
 
     if not retrieved_chunks:
-        print(f"No chunks retrieved for '{title}'.")
+
+        print(
+            f"No chunks retrieved "
+            f"for '{title}'."
+        )
 
     return retrieved_chunks
