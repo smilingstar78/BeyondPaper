@@ -1,14 +1,12 @@
 import os
 import hashlib
+import logging
+from io import BytesIO
+
 import requests
 import chromadb
 
 from dotenv import load_dotenv
-
-# Load .env before reading GEMINI_API_KEY
-load_dotenv()
-
-from io import BytesIO
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -17,13 +15,26 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # ENVIRONMENT
 # =========================================================
 
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-print("GEMINI_API_KEY exists:", bool(GEMINI_API_KEY))
+logger.info(
+    "GEMINI_API_KEY configured: %s",
+    bool(GEMINI_API_KEY)
+)
 
 GEMINI_EMBEDDING_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
     "models/gemini-embedding-001:batchEmbedContents"
+)
+
+GEMINI_QUERY_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/"
+    "models/gemini-embedding-001:embedContent"
 )
 
 
@@ -43,77 +54,78 @@ collection = chroma_client.get_or_create_collection(
 # =========================================================
 
 def create_document_embeddings(texts, title):
-
     if not GEMINI_API_KEY:
-        raise ValueError(
-            "GEMINI_API_KEY is not configured."
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing from the environment."
         )
 
     embeddings = []
-
-    # Gemini API request sizes should stay reasonable.
-    batch_size = 50
+    batch_size = 20
 
     for start in range(0, len(texts), batch_size):
-
         batch = texts[start:start + batch_size]
 
-        requests_body = []
+        requests_body = [
+            {
+                "model": "models/gemini-embedding-001",
+                "content": {
+                    "parts": [
+                        {
+                            "text": f"title: {title} | text: {text}"
+                        }
+                    ]
+                },
+                "taskType": "RETRIEVAL_DOCUMENT",
+                "outputDimensionality": 768
+            }
+            for text in batch
+        ]
 
-        for text in batch:
-
-            requests_body.append(
-                {
-                    "model": "models/gemini-embedding-001",
-                    "content": {
-                        "parts": [
-                            {
-                                "text": (
-                                    f"title: {title} | "
-                                    f"text: {text}"
-                                )
-                            }
-                        ]
-                    },
-                    "taskType": "RETRIEVAL_DOCUMENT",
-                    "outputDimensionality": 768
-                }
+        try:
+            response = requests.post(
+                GEMINI_EMBEDDING_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": GEMINI_API_KEY
+                },
+                json={"requests": requests_body},
+                timeout=60
             )
 
-        response = requests.post(
-            GEMINI_EMBEDDING_URL,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
-            },
-            json={
-                "requests": requests_body
-            },
-            timeout=60
-        )
+            if not response.ok:
+                logger.error(
+                    "Gemini embedding API returned HTTP %s: %s",
+                    response.status_code,
+                    response.text[:1000]
+                )
 
-        response.raise_for_status()
+            response.raise_for_status()
 
-        data = response.json()
+            data = response.json()
+            batch_embeddings = data.get("embeddings", [])
 
-        batch_embeddings = data.get(
-            "embeddings",
-            []
-        )
+            if len(batch_embeddings) != len(batch):
+                raise ValueError(
+                    "Gemini returned an unexpected number "
+                    "of document embeddings."
+                )
 
-        if len(batch_embeddings) != len(batch):
+            for item in batch_embeddings:
+                values = item.get("values")
 
-            raise ValueError(
-                "Gemini returned an unexpected "
-                "number of embeddings."
+                if not values:
+                    raise ValueError(
+                        "Gemini returned an empty embedding."
+                    )
+
+                embeddings.append(values)
+
+        except Exception:
+            logger.exception(
+                "Document embedding batch failed. Batch starts at %s.",
+                start
             )
-
-        embeddings.extend(
-            [
-                item["values"]
-                for item in batch_embeddings
-            ]
-        )
+            raise
 
     return embeddings
 
@@ -123,50 +135,51 @@ def create_document_embeddings(texts, title):
 # =========================================================
 
 def create_query_embedding(question):
-
     if not GEMINI_API_KEY:
-        raise ValueError(
-            "GEMINI_API_KEY is not configured."
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing from the environment."
         )
 
-    url = (
-        "https://generativelanguage.googleapis.com/"
-        "v1beta/models/gemini-embedding-001:embedContent"
-    )
-
-    response = requests.post(
-        url,
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY
-        },
-        json={
-            "model": "models/gemini-embedding-001",
-            "content": {
-                "parts": [
-                    {
-                        "text": question
-                    }
-                ]
+    try:
+        response = requests.post(
+            GEMINI_QUERY_URL,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY
             },
-            "taskType": "RETRIEVAL_QUERY",
-            "outputDimensionality": 768
-        },
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    embedding = data.get("embedding")
-
-    if not embedding:
-        raise ValueError(
-            "Gemini did not return a query embedding."
+            json={
+                "model": "models/gemini-embedding-001",
+                "content": {
+                    "parts": [{"text": question}]
+                },
+                "taskType": "RETRIEVAL_QUERY",
+                "outputDimensionality": 768
+            },
+            timeout=30
         )
 
-    return embedding["values"]
+        if not response.ok:
+            logger.error(
+                "Gemini query embedding returned HTTP %s: %s",
+                response.status_code,
+                response.text[:1000]
+            )
+
+        response.raise_for_status()
+
+        data = response.json()
+        embedding = data.get("embedding")
+
+        if not embedding or not embedding.get("values"):
+            raise ValueError(
+                "Gemini did not return a valid query embedding."
+            )
+
+        return embedding["values"]
+
+    except Exception:
+        logger.exception("Query embedding creation failed.")
+        raise
 
 
 # =========================================================
@@ -174,32 +187,40 @@ def create_query_embedding(question):
 # =========================================================
 
 def download_pdf(pdf_url):
+    logger.info("Downloading PDF: %s", pdf_url)
 
-    print(f"Downloading PDF: {pdf_url}")
-
-    response = requests.get(
-        pdf_url,
-        timeout=60,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        }
-    )
-
-    response.raise_for_status()
-
-    if not response.content.startswith(b"%PDF"):
-
-        content_type = response.headers.get(
-            "content-type",
-            ""
+    try:
+        response = requests.get(
+            pdf_url,
+            timeout=60,
+            headers={"User-Agent": "Mozilla/5.0"}
         )
 
-        raise ValueError(
-            f"URL did not return a PDF. "
-            f"Content-Type: {content_type}"
-        )
+        if not response.ok:
+            logger.error(
+                "PDF download returned HTTP %s for %s",
+                response.status_code,
+                pdf_url
+            )
 
-    return BytesIO(response.content)
+        response.raise_for_status()
+
+        if not response.content.startswith(b"%PDF"):
+            content_type = response.headers.get(
+                "content-type", "unknown"
+            )
+
+            raise ValueError(
+                f"URL did not return a PDF. "
+                f"Content-Type: {content_type}; "
+                f"first bytes: {response.content[:20]!r}"
+            )
+
+        return BytesIO(response.content)
+
+    except Exception:
+        logger.exception("PDF download failed: %s", pdf_url)
+        raise
 
 
 # =========================================================
@@ -207,43 +228,37 @@ def download_pdf(pdf_url):
 # =========================================================
 
 def read_pdf(pdf_url):
-
     pdf_file = download_pdf(pdf_url)
-
     reader = PdfReader(pdf_file)
 
     pages = []
 
-    for page_number, page in enumerate(
-        reader.pages,
-        start=1
-    ):
-
+    for page_number, page in enumerate(reader.pages, start=1):
         try:
-
             page_text = page.extract_text()
 
-            if page_text:
+            if page_text and page_text.strip():
+                pages.append({
+                    "page": page_number,
+                    "text": page_text
+                })
 
-                pages.append(
-                    {
-                        "page": page_number,
-                        "text": page_text
-                    }
-                )
-
-        except Exception as e:
-
-            print(
-                f"Could not read page "
-                f"{page_number}: {e}"
+        except Exception:
+            logger.exception(
+                "Could not extract text from PDF page %s.",
+                page_number
             )
 
     if not pages:
-
         raise ValueError(
-            "PDF contains no extractable text."
+            "PDF contains no extractable text. "
+            "It may be scanned or image-only."
         )
+
+    logger.info(
+        "Extracted text from %s PDF pages.",
+        len(pages)
+    )
 
     return pages
 
@@ -253,7 +268,6 @@ def read_pdf(pdf_url):
 # =========================================================
 
 def chunk_text(pages):
-
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=150
@@ -262,19 +276,13 @@ def chunk_text(pages):
     all_chunks = []
 
     for page in pages:
-
-        chunks = splitter.split_text(
-            page["text"]
-        )
+        chunks = splitter.split_text(page["text"])
 
         for chunk in chunks:
-
-            all_chunks.append(
-                {
-                    "text": chunk,
-                    "page": page["page"]
-                }
-            )
+            all_chunks.append({
+                "text": chunk,
+                "page": page["page"]
+            })
 
     return all_chunks
 
@@ -284,82 +292,57 @@ def chunk_text(pages):
 # =========================================================
 
 def store_paper(title, pdf_url):
-
-    print(f"\nReading: {title}")
+    logger.info("Reading paper: %s", title)
 
     try:
-
         pages = read_pdf(pdf_url)
 
-    except Exception as e:
-
-        print(
-            f"Failed to read PDF for "
-            f"'{title}': {e}"
+        total_characters = sum(
+            len(page["text"]) for page in pages
         )
 
-        return False
-
-    total_characters = sum(
-        len(page["text"])
-        for page in pages
-    )
-
-    print(
-        f"Extracted "
-        f"{total_characters} characters."
-    )
-
-    chunks = chunk_text(pages)
-
-    print(
-        f"Created {len(chunks)} chunks."
-    )
-
-    if not chunks:
-
-        print(
-            f"No chunks created for "
-            f"'{title}'."
+        logger.info(
+            "Extracted %s characters from '%s'.",
+            total_characters,
+            title
         )
 
-        return False
+        chunks = chunk_text(pages)
 
-    paper_id = hashlib.md5(
-        pdf_url.encode()
-    ).hexdigest()
+        if not chunks:
+            raise ValueError(
+                f"No text chunks were created for '{title}'."
+            )
 
-    ids = [
-        f"{paper_id}_{i}"
-        for i in range(len(chunks))
-    ]
+        logger.info(
+            "Created %s chunks for '%s'.",
+            len(chunks),
+            title
+        )
 
-    documents = [
-        chunk["text"]
-        for chunk in chunks
-    ]
+        paper_id = hashlib.md5(
+            pdf_url.encode("utf-8")
+        ).hexdigest()
 
-    print(
-        "Creating Gemini embeddings..."
-    )
+        ids = [
+            f"{paper_id}_{i}"
+            for i in range(len(chunks))
+        ]
 
-    try:
+        documents = [
+            chunk["text"] for chunk in chunks
+        ]
 
         vectors = create_document_embeddings(
             documents,
             title
         )
 
-    except Exception as e:
-
-        print(
-            f"Embedding creation failed "
-            f"for '{title}': {e}"
-        )
-
-        return False
-
-    try:
+        if len(vectors) != len(documents):
+            raise ValueError(
+                "The number of embeddings does not match "
+                "the number of text chunks."
+            )
 
         collection.upsert(
             ids=ids,
@@ -376,20 +359,24 @@ def store_paper(title, pdf_url):
             ]
         )
 
-    except Exception as e:
-
-        print(
-            f"Chroma upsert failed "
-            f"for '{title}': {e}"
+        logger.info(
+            "Successfully indexed %s chunks for '%s'.",
+            len(chunks),
+            title
         )
 
+        return True
+
+    except Exception:
+        logger.exception(
+            "Failed to read/index paper '%s'. URL: %s",
+            title,
+            pdf_url
+        )
+
+        # Keep the existing return-False behavior so the graph
+        # can try the next selected paper.
         return False
-
-    print(
-        f"Stored {len(chunks)} chunks."
-    )
-
-    return True
 
 
 # =========================================================
@@ -400,17 +387,13 @@ DEFAULT_QUERIES = [
     "research problem and objective",
     "method or approach used",
     "limitations and weaknesses",
-    "future work and open questions",
+    "future work and open questions"
 ]
 
 
 def _query_chunks(question, title, k):
-
     try:
-
-        query_embedding = create_query_embedding(
-            question
-        )
+        query_embedding = create_query_embedding(question)
 
         results = collection.query(
             query_embeddings=[query_embedding],
@@ -418,72 +401,49 @@ def _query_chunks(question, title, k):
             where={"title": title}
         )
 
-    except Exception as e:
+        documents = results.get("documents") or []
+        metadatas = results.get("metadatas") or []
 
-        print(
-            f"Chroma search error for query "
-            f"'{question}': {e}"
+        if not documents or not documents[0]:
+            return []
+
+        docs = documents[0]
+        metadata_list = (
+            metadatas[0]
+            if metadatas and metadatas[0]
+            else [{} for _ in docs]
         )
 
-        return []
+        return [
+            (
+                metadata.get("page", "unknown"),
+                document
+            )
+            for document, metadata in zip(
+                docs, metadata_list
+            )
+        ]
 
-    documents = results.get("documents")
-    metadatas = results.get("metadatas")
-
-    if not documents or not documents[0]:
-
-        return []
-
-    documents = documents[0]
-
-    metadatas = (
-        metadatas[0]
-        if metadatas
-        else [{} for _ in documents]
-    )
-
-    chunks = []
-
-    for document, metadata in zip(
-        documents,
-        metadatas
-    ):
-
-        page = metadata.get(
-            "page",
-            "unknown"
+    except Exception:
+        logger.exception(
+            "Chroma search failed for paper '%s', query '%s'.",
+            title,
+            question
         )
-
-        chunks.append(
-            (page, document)
-        )
-
-    return chunks
+        raise
 
 
 def search_paper(title, questions=None, k=2):
-
-    queries = (
-        questions
-        or DEFAULT_QUERIES
-    )
+    queries = questions or DEFAULT_QUERIES
 
     seen = set()
-
     retrieved_chunks = []
 
     for question in queries:
-
         for page, document in _query_chunks(
-            question,
-            title,
-            k
+            question, title, k
         ):
-
-            key = (
-                page,
-                document
-            )
+            key = (page, document)
 
             if key in seen:
                 continue
@@ -495,10 +455,9 @@ def search_paper(title, questions=None, k=2):
             )
 
     if not retrieved_chunks:
-
-        print(
-            f"No chunks retrieved "
-            f"for '{title}'."
+        logger.warning(
+            "No chunks retrieved for paper '%s'.",
+            title
         )
 
     return retrieved_chunks
