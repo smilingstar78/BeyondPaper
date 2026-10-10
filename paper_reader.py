@@ -1,3 +1,4 @@
+
 import os
 import hashlib
 import logging
@@ -12,7 +13,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 # =========================================================
-# ENVIRONMENT
+# ENVIRONMENT AND LOGGING
 # =========================================================
 
 load_dotenv()
@@ -21,11 +22,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-logger.info(
-    "GEMINI_API_KEY configured: %s",
-    bool(GEMINI_API_KEY)
-)
 
 GEMINI_EMBEDDING_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
@@ -37,9 +33,14 @@ GEMINI_QUERY_URL = (
     "models/gemini-embedding-001:embedContent"
 )
 
+logger.info(
+    "GEMINI_API_KEY configured: %s",
+    bool(GEMINI_API_KEY)
+)
+
 
 # =========================================================
-# CHROMA - IN MEMORY
+# CHROMA — IN MEMORY
 # =========================================================
 
 chroma_client = chromadb.Client()
@@ -50,7 +51,7 @@ collection = chroma_client.get_or_create_collection(
 
 
 # =========================================================
-# GEMINI EMBEDDINGS
+# GEMINI DOCUMENT EMBEDDINGS
 # =========================================================
 
 def create_document_embeddings(texts, title):
@@ -76,7 +77,7 @@ def create_document_embeddings(texts, title):
                     ]
                 },
                 "taskType": "RETRIEVAL_DOCUMENT",
-                "outputDimensionality": 768
+                "outputDimensionality": 768,
             }
             for text in batch
         ]
@@ -86,22 +87,23 @@ def create_document_embeddings(texts, title):
                 GEMINI_EMBEDDING_URL,
                 headers={
                     "Content-Type": "application/json",
-                    "x-goog-api-key": GEMINI_API_KEY
+                    "x-goog-api-key": GEMINI_API_KEY,
                 },
                 json={"requests": requests_body},
-                timeout=60
+                timeout=60,
             )
 
             if not response.ok:
                 logger.error(
-                    "Gemini embedding API returned HTTP %s: %s",
+                    "Gemini document embedding failed. "
+                    "HTTP %s: %s",
                     response.status_code,
-                    response.text[:1000]
+                    response.text[:1500],
                 )
 
             response.raise_for_status()
-
             data = response.json()
+
             batch_embeddings = data.get("embeddings", [])
 
             if len(batch_embeddings) != len(batch):
@@ -115,15 +117,17 @@ def create_document_embeddings(texts, title):
 
                 if not values:
                     raise ValueError(
-                        "Gemini returned an empty embedding."
+                        "Gemini returned an empty document embedding."
                     )
 
                 embeddings.append(values)
 
         except Exception:
             logger.exception(
-                "Document embedding batch failed. Batch starts at %s.",
-                start
+                "Document embedding batch failed. "
+                "Batch starts at %s for paper '%s'.",
+                start,
+                title,
             )
             raise
 
@@ -145,7 +149,7 @@ def create_query_embedding(question):
             GEMINI_QUERY_URL,
             headers={
                 "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
+                "x-goog-api-key": GEMINI_API_KEY,
             },
             json={
                 "model": "models/gemini-embedding-001",
@@ -153,29 +157,30 @@ def create_query_embedding(question):
                     "parts": [{"text": question}]
                 },
                 "taskType": "RETRIEVAL_QUERY",
-                "outputDimensionality": 768
+                "outputDimensionality": 768,
             },
-            timeout=30
+            timeout=30,
         )
 
         if not response.ok:
             logger.error(
-                "Gemini query embedding returned HTTP %s: %s",
+                "Gemini query embedding failed. HTTP %s: %s",
                 response.status_code,
-                response.text[:1000]
+                response.text[:1500],
             )
 
         response.raise_for_status()
 
         data = response.json()
-        embedding = data.get("embedding")
+        embedding = data.get("embedding", {})
+        values = embedding.get("values")
 
-        if not embedding or not embedding.get("values"):
+        if not values:
             raise ValueError(
                 "Gemini did not return a valid query embedding."
             )
 
-        return embedding["values"]
+        return values
 
     except Exception:
         logger.exception("Query embedding creation failed.")
@@ -187,20 +192,24 @@ def create_query_embedding(question):
 # =========================================================
 
 def download_pdf(pdf_url):
+    if not pdf_url:
+        raise ValueError("The paper has no PDF URL.")
+
     logger.info("Downloading PDF: %s", pdf_url)
 
     try:
         response = requests.get(
             pdf_url,
             timeout=60,
-            headers={"User-Agent": "Mozilla/5.0"}
+            headers={"User-Agent": "Mozilla/5.0 BeyondPaper/1.0"},
+            allow_redirects=True,
         )
 
         if not response.ok:
             logger.error(
-                "PDF download returned HTTP %s for %s",
+                "PDF download failed. HTTP %s for %s",
                 response.status_code,
-                pdf_url
+                pdf_url,
             )
 
         response.raise_for_status()
@@ -211,9 +220,9 @@ def download_pdf(pdf_url):
             )
 
             raise ValueError(
-                f"URL did not return a PDF. "
+                "The supplied URL did not return a PDF. "
                 f"Content-Type: {content_type}; "
-                f"first bytes: {response.content[:20]!r}"
+                f"first bytes: {response.content[:30]!r}"
             )
 
         return BytesIO(response.content)
@@ -231,6 +240,16 @@ def read_pdf(pdf_url):
     pdf_file = download_pdf(pdf_url)
     reader = PdfReader(pdf_file)
 
+    if reader.is_encrypted:
+        try:
+            result = reader.decrypt("")
+            if result == 0:
+                raise ValueError("The PDF is password-protected.")
+        except Exception as exc:
+            raise ValueError(
+                f"Could not decrypt the PDF: {exc}"
+            ) from exc
+
     pages = []
 
     for page_number, page in enumerate(reader.pages, start=1):
@@ -238,26 +257,28 @@ def read_pdf(pdf_url):
             page_text = page.extract_text()
 
             if page_text and page_text.strip():
-                pages.append({
-                    "page": page_number,
-                    "text": page_text
-                })
+                pages.append(
+                    {
+                        "page": page_number,
+                        "text": page_text,
+                    }
+                )
 
         except Exception:
             logger.exception(
                 "Could not extract text from PDF page %s.",
-                page_number
+                page_number,
             )
 
     if not pages:
         raise ValueError(
-            "PDF contains no extractable text. "
-            "It may be scanned or image-only."
+            "The PDF contains no extractable text. "
+            "It may be scanned, image-only, or unsupported."
         )
 
     logger.info(
-        "Extracted text from %s PDF pages.",
-        len(pages)
+        "Extracted text from %s pages.",
+        len(pages),
     )
 
     return pages
@@ -270,7 +291,7 @@ def read_pdf(pdf_url):
 def chunk_text(pages):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
-        chunk_overlap=150
+        chunk_overlap=150,
     )
 
     all_chunks = []
@@ -279,10 +300,12 @@ def chunk_text(pages):
         chunks = splitter.split_text(page["text"])
 
         for chunk in chunks:
-            all_chunks.append({
-                "text": chunk,
-                "page": page["page"]
-            })
+            all_chunks.append(
+                {
+                    "text": chunk,
+                    "page": page["page"],
+                }
+            )
 
     return all_chunks
 
@@ -292,7 +315,7 @@ def chunk_text(pages):
 # =========================================================
 
 def store_paper(title, pdf_url):
-    logger.info("Reading paper: %s", title)
+    logger.info("Starting paper processing: %s", title)
 
     try:
         pages = read_pdf(pdf_url)
@@ -304,7 +327,7 @@ def store_paper(title, pdf_url):
         logger.info(
             "Extracted %s characters from '%s'.",
             total_characters,
-            title
+            title,
         )
 
         chunks = chunk_text(pages)
@@ -317,12 +340,12 @@ def store_paper(title, pdf_url):
         logger.info(
             "Created %s chunks for '%s'.",
             len(chunks),
-            title
+            title,
         )
 
-        paper_id = hashlib.md5(
+        paper_id = hashlib.sha256(
             pdf_url.encode("utf-8")
-        ).hexdigest()
+        ).hexdigest()[:32]
 
         ids = [
             f"{paper_id}_{i}"
@@ -335,13 +358,21 @@ def store_paper(title, pdf_url):
 
         vectors = create_document_embeddings(
             documents,
-            title
+            title,
         )
 
         if len(vectors) != len(documents):
             raise ValueError(
                 "The number of embeddings does not match "
                 "the number of text chunks."
+            )
+
+        if any(
+            len(vector) != len(vectors[0])
+            for vector in vectors
+        ):
+            raise ValueError(
+                "Gemini returned embeddings with inconsistent dimensions."
             )
 
         collection.upsert(
@@ -353,41 +384,45 @@ def store_paper(title, pdf_url):
                     "title": title,
                     "pdf_url": pdf_url,
                     "page": chunk["page"],
-                    "chunk_index": i
+                    "chunk_index": i,
                 }
                 for i, chunk in enumerate(chunks)
-            ]
+            ],
         )
 
         logger.info(
             "Successfully indexed %s chunks for '%s'.",
             len(chunks),
-            title
+            title,
         )
 
         return True
 
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Failed to read/index paper '%s'. URL: %s",
             title,
-            pdf_url
+            pdf_url,
         )
 
-        # Keep the existing return-False behavior so the graph
-        # can try the next selected paper.
-        return False
+        # IMPORTANT:
+        # Pass the actual failure to main.py instead of
+        # hiding it behind a False return value.
+        raise RuntimeError(
+            f"Failed to process '{title}': "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 # =========================================================
-# SEARCH PAPER
+# SEARCH PAPER CHUNKS
 # =========================================================
 
 DEFAULT_QUERIES = [
     "research problem and objective",
     "method or approach used",
     "limitations and weaknesses",
-    "future work and open questions"
+    "future work and open questions",
 ]
 
 
@@ -395,10 +430,16 @@ def _query_chunks(question, title, k):
     try:
         query_embedding = create_query_embedding(question)
 
+        count = collection.count()
+
+        if count == 0:
+            logger.warning("Chroma collection is empty.")
+            return []
+
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=k,
-            where={"title": title}
+            n_results=min(k, count),
+            where={"title": title},
         )
 
         documents = results.get("documents") or []
@@ -408,6 +449,7 @@ def _query_chunks(question, title, k):
             return []
 
         docs = documents[0]
+
         metadata_list = (
             metadatas[0]
             if metadatas and metadatas[0]
@@ -417,10 +459,11 @@ def _query_chunks(question, title, k):
         return [
             (
                 metadata.get("page", "unknown"),
-                document
+                document,
             )
             for document, metadata in zip(
-                docs, metadata_list
+                docs,
+                metadata_list,
             )
         ]
 
@@ -428,7 +471,7 @@ def _query_chunks(question, title, k):
         logger.exception(
             "Chroma search failed for paper '%s', query '%s'.",
             title,
-            question
+            question,
         )
         raise
 
@@ -440,9 +483,13 @@ def search_paper(title, questions=None, k=2):
     retrieved_chunks = []
 
     for question in queries:
-        for page, document in _query_chunks(
-            question, title, k
-        ):
+        results = _query_chunks(
+            question,
+            title,
+            k,
+        )
+
+        for page, document in results:
             key = (page, document)
 
             if key in seen:
@@ -457,7 +504,7 @@ def search_paper(title, questions=None, k=2):
     if not retrieved_chunks:
         logger.warning(
             "No chunks retrieved for paper '%s'.",
-            title
+            title,
         )
 
     return retrieved_chunks
